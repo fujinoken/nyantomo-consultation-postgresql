@@ -355,7 +355,11 @@ def render_dashboard():
         st.markdown('<div class="ny-hero">', unsafe_allow_html=True)
         image_path = Path(__file__).parent / "assets" / "dashboard_cat.png"
         if image_path.exists():
-            st.image(str(image_path), use_container_width=True)
+            # イラストを大きく出しすぎないため、固定幅で中央表示します。
+            # サイズを変えたい場合は width=300〜420 の範囲で調整してください。
+            img_left, img_center, img_right = st.columns([1, 1.15, 1])
+            with img_center:
+                st.image(str(image_path), width=340)
         else:
             st.info("ダッシュボード画像が見つかりません。assets/dashboard_cat.png を配置してください。")
         st.markdown(
@@ -444,7 +448,7 @@ def render_dashboard():
             height=180
         )
 
-    st.markdown('<div class="ny-footer">© にゃんとも相談管理 Ver3.2.5｜安定・安全・効率的な相談業務をサポートします 🐾</div>', unsafe_allow_html=True)
+    st.markdown('<div class="ny-footer">© にゃんとも相談管理 Ver3.2.6｜安定・安全・効率的な相談業務をサポートします 🐾</div>', unsafe_allow_html=True)
 
 
 
