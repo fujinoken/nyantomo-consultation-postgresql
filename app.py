@@ -10,7 +10,7 @@ import psycopg2.extras
 import streamlit as st
 
 # ============================================================
-# にゃんとも相談管理システム Ver3.0 PostgreSQL試作版
+# にゃんとも相談管理システム Ver3.0.1 PostgreSQL試作版
 # ------------------------------------------------------------
 # Ver2.4 SQLite版とは別アプリとして並行テストするための試作版
 #
@@ -35,12 +35,12 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="にゃんとも相談管理 Ver3.0 PostgreSQL試作版",
+    page_title="にゃんとも相談管理 Ver3.0.1 PostgreSQL試作版",
     page_icon="🐾",
     layout="wide"
 )
 
-APP_VERSION = "3.0 PostgreSQL試作版"
+APP_VERSION = "3.0.1 PostgreSQL試作版"
 
 ADMIN_MENUS = [
     "管理ダッシュボード",
@@ -175,7 +175,7 @@ def normalize_text(v):
 
 
 def show_db_setup_screen():
-    st.title("🐾 にゃんとも相談管理 Ver3.0 PostgreSQL試作版")
+    st.title("🐾 にゃんとも相談管理 Ver3.0.1 PostgreSQL試作版")
     st.error("PostgreSQL接続URLがまだ設定されていません。")
 
     st.markdown("""
@@ -455,7 +455,7 @@ def init_db():
 # ============================================================
 
 def login_screen():
-    st.title("🐾 にゃんとも相談管理 Ver3.0 PostgreSQL試作版")
+    st.title("🐾 にゃんとも相談管理 Ver3.0.1 PostgreSQL試作版")
     st.subheader("ログイン")
 
     with st.form("login_form"):
@@ -592,20 +592,83 @@ if not has_database_url():
 try:
     init_db()
 except Exception as e:
-    st.title("🐾 にゃんとも相談管理 Ver3.0 PostgreSQL試作版")
+    st.title("🐾 にゃんとも相談管理 Ver3.0.1 PostgreSQL試作版")
     st.error("PostgreSQLへの接続または初期化に失敗しました。")
     st.exception(e)
     st.stop()
 
 require_login()
 
-st.title("🐾 にゃんとも相談管理 Ver3.0 PostgreSQL試作版")
+st.title("🐾 にゃんとも相談管理 Ver3.0.1 PostgreSQL試作版")
 st.caption("PostgreSQLリレーショナルDB版／Ver2.4 SQLite版とは別アプリとして並行テスト用")
 
 role = st.session_state.get("role", "職員")
 available_menus = ADMIN_MENUS if role == "管理者" else STAFF_MENUS
 menu = st.sidebar.radio("メニュー", available_menus)
 logout_button()
+
+
+# ============================================================
+# 関連カード共通
+# ============================================================
+
+def related_card_page(table_name, id_col, title, fields):
+    st.subheader(title)
+
+    case_map, case_labels = get_case_options()
+    if not case_labels:
+        st.warning("先に案件を登録してください。")
+        return
+
+    selected_label = st.selectbox("対象案件", case_labels)
+    case_id = case_map[selected_label]
+    client_id = case_to_client(case_id)
+
+    st.markdown("### 登録")
+    with st.form(f"{table_name}_create"):
+        values = {}
+        for key, label, kind in fields:
+            if kind == "text":
+                values[key] = st.text_input(label)
+            elif kind == "area":
+                values[key] = st.text_area(label)
+            elif kind == "date":
+                values[key] = st.date_input(label, date.today())
+        ok = st.form_submit_button("登録する")
+
+    if ok:
+        new_id = make_id(id_col.replace("_id", ""))
+        cols = [id_col, "case_id", "client_id", "created_at", "updated_at"] + [x[0] for x in fields]
+        params = {id_col: new_id, "case_id": case_id, "client_id": client_id, "created_at": now_text(), "updated_at": now_text(), **values}
+        sql = f"""
+            INSERT INTO {table_name}
+            ({", ".join(cols)})
+            VALUES
+            ({", ".join([f"%({c})s" for c in cols])})
+        """
+        execute(sql, params)
+        log_action("create", table_name, new_id, f"{title}登録")
+        st.success("登録しました。")
+        st.rerun()
+
+    st.markdown("---")
+    st.markdown("### 一覧")
+    df = fetch_df(f"SELECT * FROM {table_name} WHERE case_id=%(case_id)s ORDER BY created_at DESC", {"case_id": case_id})
+    st.dataframe(df, use_container_width=True)
+
+    if not df.empty:
+        selected = st.selectbox("削除するID", df[id_col].tolist(), key=f"{table_name}_delete_select")
+        delete_confirm = st.checkbox("削除することを確認しました。", key=f"{table_name}_delete_confirm")
+        delete_text = st.text_input("削除する場合は DELETE と入力", key=f"{table_name}_delete_text")
+        if st.button("削除する", key=f"{table_name}_delete_button"):
+            if not delete_confirm or delete_text != "DELETE":
+                st.error("削除するには確認チェックを入れ、DELETE と入力してください。")
+            else:
+                execute(f"DELETE FROM {table_name} WHERE {id_col}=%(id)s", {"id": selected})
+                log_action("delete", table_name, selected, f"{title}削除")
+                st.success("削除しました。")
+                st.rerun()
+
 
 
 # ============================================================
@@ -1014,67 +1077,6 @@ elif menu == "相談履歴 登録・確認":
         """, {"case_id": case_id})
         st.dataframe(df, use_container_width=True)
 
-
-# ============================================================
-# 関連カード共通
-# ============================================================
-
-def related_card_page(table_name, id_col, title, fields):
-    st.subheader(title)
-
-    case_map, case_labels = get_case_options()
-    if not case_labels:
-        st.warning("先に案件を登録してください。")
-        return
-
-    selected_label = st.selectbox("対象案件", case_labels)
-    case_id = case_map[selected_label]
-    client_id = case_to_client(case_id)
-
-    st.markdown("### 登録")
-    with st.form(f"{table_name}_create"):
-        values = {}
-        for key, label, kind in fields:
-            if kind == "text":
-                values[key] = st.text_input(label)
-            elif kind == "area":
-                values[key] = st.text_area(label)
-            elif kind == "date":
-                values[key] = st.date_input(label, date.today())
-        ok = st.form_submit_button("登録する")
-
-    if ok:
-        new_id = make_id(id_col.replace("_id", ""))
-        cols = [id_col, "case_id", "client_id", "created_at", "updated_at"] + [x[0] for x in fields]
-        params = {id_col: new_id, "case_id": case_id, "client_id": client_id, "created_at": now_text(), "updated_at": now_text(), **values}
-        sql = f"""
-            INSERT INTO {table_name}
-            ({", ".join(cols)})
-            VALUES
-            ({", ".join([f"%({c})s" for c in cols])})
-        """
-        execute(sql, params)
-        log_action("create", table_name, new_id, f"{title}登録")
-        st.success("登録しました。")
-        st.rerun()
-
-    st.markdown("---")
-    st.markdown("### 一覧")
-    df = fetch_df(f"SELECT * FROM {table_name} WHERE case_id=%(case_id)s ORDER BY created_at DESC", {"case_id": case_id})
-    st.dataframe(df, use_container_width=True)
-
-    if not df.empty:
-        selected = st.selectbox("削除するID", df[id_col].tolist(), key=f"{table_name}_delete_select")
-        delete_confirm = st.checkbox("削除することを確認しました。", key=f"{table_name}_delete_confirm")
-        delete_text = st.text_input("削除する場合は DELETE と入力", key=f"{table_name}_delete_text")
-        if st.button("削除する", key=f"{table_name}_delete_button"):
-            if not delete_confirm or delete_text != "DELETE":
-                st.error("削除するには確認チェックを入れ、DELETE と入力してください。")
-            else:
-                execute(f"DELETE FROM {table_name} WHERE {id_col}=%(id)s", {"id": selected})
-                log_action("delete", table_name, selected, f"{title}削除")
-                st.success("削除しました。")
-                st.rerun()
 
 
 elif menu == "空き家カード":
