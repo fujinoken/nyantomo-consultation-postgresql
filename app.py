@@ -2,9 +2,7 @@ import os
 import uuid
 import hashlib
 import hmac
-import io
-import zipfile
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 import psycopg2
@@ -12,9 +10,9 @@ import psycopg2.extras
 import streamlit as st
 
 # ============================================================
-# にゃんとも相談管理システム Ver3.0.9 安定稼働版
+# にゃんとも相談管理システム Ver3.1.0 DB層整理版
 # ------------------------------------------------------------
-# Ver2.4 SQLite版とは別アプリとして並行テストするための試作版
+# DB層整理版：PostgreSQL接続を明示的に開閉し、安定稼働を優先
 #
 # 主な対象：
 # - 相談者
@@ -37,12 +35,12 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="にゃんとも相談管理 Ver3.0.9 安定稼働版",
+    page_title="にゃんとも相談管理 Ver3.1.0 DB層整理版",
     page_icon="🐾",
     layout="wide"
 )
 
-APP_VERSION = "3.0.9 安定稼働版"
+APP_VERSION = "3.1.0 DB層整理版"
 
 ADMIN_MENUS = [
     "管理ダッシュボード",
@@ -120,6 +118,7 @@ def has_database_url():
 
 
 def get_conn():
+    """PostgreSQL接続を取得する。呼び出し側で必ず close する。"""
     url = get_database_url()
     if not url:
         raise RuntimeError("PostgreSQL接続URLが設定されていません。")
@@ -127,23 +126,51 @@ def get_conn():
 
 
 def execute(sql, params=None):
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(sql, params or {})
+    """INSERT / UPDATE / DELETE / DDL 用。接続と cursor を必ず閉じる。"""
+    conn = None
+    cur = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(sql, params or {})
         conn.commit()
+    except Exception:
+        if conn:
+            conn.rollback()
+        raise
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
 
 
 def fetch_df(sql, params=None):
-    with get_conn() as conn:
+    """SELECT結果を DataFrame で返す。pandas用に接続を明示的に閉じる。"""
+    conn = None
+    try:
+        conn = get_conn()
         return pd.read_sql_query(sql, conn, params=params or {})
+    finally:
+        if conn:
+            conn.close()
 
 
 def fetch_one(sql, params=None):
-    with get_conn() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(sql, params or {})
-            row = cur.fetchone()
-            return dict(row) if row else None
+    """SELECT結果を1行だけ dict で返す。"""
+    conn = None
+    cur = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(sql, params or {})
+        row = cur.fetchone()
+        return dict(row) if row else None
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
 
 
 # ============================================================
@@ -177,7 +204,7 @@ def normalize_text(v):
 
 
 def show_db_setup_screen():
-    st.title("🐾 にゃんとも相談管理 Ver3.0.9 安定稼働版")
+    st.title("🐾 にゃんとも相談管理 Ver3.1.0 DB層整理版")
     st.error("PostgreSQL接続URLがまだ設定されていません。")
 
     st.markdown("""
@@ -221,246 +248,260 @@ def log_action(action, table_name="", record_id="", memo=""):
 # ============================================================
 
 def init_db():
-    with get_conn() as conn:
-        with conn.cursor() as cur:
+    conn = None
+    cur = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS clients (
+                client_id TEXT PRIMARY KEY,
+                created_at TIMESTAMP,
+                updated_at TIMESTAMP,
+                name TEXT NOT NULL,
+                age_group TEXT,
+                area TEXT,
+                contact_method TEXT,
+                position TEXT,
+                note TEXT
+            )
+        """)
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS cases (
+                case_id TEXT PRIMARY KEY,
+                client_id TEXT NOT NULL REFERENCES clients(client_id) ON DELETE CASCADE,
+                created_at TIMESTAMP,
+                updated_at TIMESTAMP,
+                consult_date DATE,
+                case_title TEXT,
+                case_type TEXT,
+                status TEXT,
+                current_state TEXT,
+                house_state TEXT,
+                cat_relation TEXT,
+                family_gap TEXT,
+                pressure TEXT,
+                worries TEXT,
+                not_decide TEXT,
+                first_check TEXT,
+                free_memo TEXT,
+                internal_memo TEXT,
+                next_check TEXT,
+                next_hearing_items TEXT,
+                hearing_missing TEXT,
+                do_not_do_now TEXT,
+                next_check_date DATE,
+                closed_date DATE,
+                close_reason TEXT,
+                final_memo TEXT,
+                reopen_possibility TEXT
+            )
+        """)
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS history (
+                history_id TEXT PRIMARY KEY,
+                case_id TEXT REFERENCES cases(case_id) ON DELETE CASCADE,
+                client_id TEXT REFERENCES clients(client_id) ON DELETE CASCADE,
+                created_at TIMESTAMP,
+                record_date DATE,
+                record_type TEXT,
+                before_status TEXT,
+                after_status TEXT,
+                record TEXT,
+                next_action TEXT,
+                internal_memo TEXT
+            )
+        """)
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS properties (
+                property_id TEXT PRIMARY KEY,
+                case_id TEXT REFERENCES cases(case_id) ON DELETE CASCADE,
+                client_id TEXT REFERENCES clients(client_id) ON DELETE CASCADE,
+                created_at TIMESTAMP,
+                updated_at TIMESTAMP,
+                property_name TEXT,
+                address TEXT,
+                property_status TEXT,
+                vacant_status TEXT,
+                key_hold TEXT,
+                neighborhood TEXT,
+                visit_frequency TEXT,
+                memo TEXT
+            )
+        """)
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS cats (
+                cat_id TEXT PRIMARY KEY,
+                case_id TEXT REFERENCES cases(case_id) ON DELETE CASCADE,
+                client_id TEXT REFERENCES clients(client_id) ON DELETE CASCADE,
+                created_at TIMESTAMP,
+                updated_at TIMESTAMP,
+                cat_name TEXT,
+                age TEXT,
+                sex TEXT,
+                health_memo TEXT,
+                life_status TEXT,
+                future_plan TEXT,
+                memo TEXT
+            )
+        """)
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS family (
+                family_id TEXT PRIMARY KEY,
+                case_id TEXT REFERENCES cases(case_id) ON DELETE CASCADE,
+                client_id TEXT REFERENCES clients(client_id) ON DELETE CASCADE,
+                created_at TIMESTAMP,
+                updated_at TIMESTAMP,
+                name TEXT,
+                relation TEXT,
+                contact_ok TEXT,
+                temperature TEXT,
+                memo TEXT
+            )
+        """)
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS photos (
+                photo_id TEXT PRIMARY KEY,
+                case_id TEXT REFERENCES cases(case_id) ON DELETE CASCADE,
+                client_id TEXT REFERENCES clients(client_id) ON DELETE CASCADE,
+                created_at TIMESTAMP,
+                photo_type TEXT,
+                file_name TEXT,
+                storage_note TEXT,
+                memo TEXT
+            )
+        """)
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS ai_summaries (
+                summary_id TEXT PRIMARY KEY,
+                case_id TEXT REFERENCES cases(case_id) ON DELETE CASCADE,
+                client_id TEXT REFERENCES clients(client_id) ON DELETE CASCADE,
+                created_at TIMESTAMP,
+                summary_type TEXT,
+                source_text TEXT,
+                summary_text TEXT,
+                memo TEXT
+            )
+        """)
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS line_settings (
+                setting_id TEXT PRIMARY KEY,
+                created_at TIMESTAMP,
+                updated_at TIMESTAMP,
+                setting_name TEXT,
+                setting_value TEXT,
+                memo TEXT
+            )
+        """)
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS line_messages (
+                message_id TEXT PRIMARY KEY,
+                case_id TEXT REFERENCES cases(case_id) ON DELETE SET NULL,
+                client_id TEXT REFERENCES clients(client_id) ON DELETE SET NULL,
+                created_at TIMESTAMP,
+                created_by TEXT,
+                to_target TEXT,
+                message_text TEXT,
+                send_status TEXT,
+                response_memo TEXT
+            )
+        """)
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS app_users (
+                user_id TEXT PRIMARY KEY,
+                created_at TIMESTAMP,
+                updated_at TIMESTAMP,
+                login_id TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                role TEXT NOT NULL,
+                display_name TEXT,
+                active INTEGER DEFAULT 1
+            )
+        """)
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS audit_logs (
+                audit_id TEXT PRIMARY KEY,
+                created_at TIMESTAMP,
+                login_id TEXT,
+                action TEXT,
+                table_name TEXT,
+                record_id TEXT,
+                memo TEXT
+            )
+        """)
+
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_cases_client_id ON cases(client_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_cases_status ON cases(status)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_cases_next_check_date ON cases(next_check_date)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_history_case_id ON history(case_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_properties_case_id ON properties(case_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_cats_case_id ON cats(case_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_family_case_id ON family(case_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_summaries_case_id ON ai_summaries(case_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_line_messages_case_id ON line_messages(case_id)")
+
+        # PostgreSQL安定化のため、起動時の ALTER TABLE は実行しません。
+        # DB構造変更は Neon などのSQL Editorで一度だけ行います。
+
+        cur.execute("SELECT COUNT(*) FROM app_users")
+        count = cur.fetchone()[0]
+        if count == 0:
             cur.execute("""
-                CREATE TABLE IF NOT EXISTS clients (
-                    client_id TEXT PRIMARY KEY,
-                    created_at TIMESTAMP,
-                    updated_at TIMESTAMP,
-                    name TEXT NOT NULL,
-                    age_group TEXT,
-                    area TEXT,
-                    contact_method TEXT,
-                    position TEXT,
-                    note TEXT
-                )
-            """)
+                INSERT INTO app_users
+                (user_id, created_at, updated_at, login_id, password_hash, role, display_name, active)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, 1)
+            """, (
+                make_id("user"),
+                now_text(),
+                now_text(),
+                "admin",
+                hash_password("admin123"),
+                "管理者",
+                "管理者"
+            ))
 
             cur.execute("""
-                CREATE TABLE IF NOT EXISTS cases (
-                    case_id TEXT PRIMARY KEY,
-                    client_id TEXT NOT NULL REFERENCES clients(client_id) ON DELETE CASCADE,
-                    created_at TIMESTAMP,
-                    updated_at TIMESTAMP,
-                    consult_date DATE,
-                    case_title TEXT,
-                    case_type TEXT,
-                    status TEXT,
-                    current_state TEXT,
-                    house_state TEXT,
-                    cat_relation TEXT,
-                    family_gap TEXT,
-                    pressure TEXT,
-                    worries TEXT,
-                    not_decide TEXT,
-                    first_check TEXT,
-                    free_memo TEXT,
-                    internal_memo TEXT,
-                    next_check TEXT,
-                    next_hearing_items TEXT,
-                    hearing_missing TEXT,
-                    do_not_do_now TEXT,
-                    next_check_date DATE,
-                    closed_date DATE,
-                    close_reason TEXT,
-                    final_memo TEXT,
-                    reopen_possibility TEXT
-                )
-            """)
-
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS history (
-                    history_id TEXT PRIMARY KEY,
-                    case_id TEXT REFERENCES cases(case_id) ON DELETE CASCADE,
-                    client_id TEXT REFERENCES clients(client_id) ON DELETE CASCADE,
-                    created_at TIMESTAMP,
-                    record_date DATE,
-                    record_type TEXT,
-                    before_status TEXT,
-                    after_status TEXT,
-                    record TEXT,
-                    next_action TEXT,
-                    internal_memo TEXT
-                )
-            """)
-
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS properties (
-                    property_id TEXT PRIMARY KEY,
-                    case_id TEXT REFERENCES cases(case_id) ON DELETE CASCADE,
-                    client_id TEXT REFERENCES clients(client_id) ON DELETE CASCADE,
-                    created_at TIMESTAMP,
-                    updated_at TIMESTAMP,
-                    property_name TEXT,
-                    address TEXT,
-                    property_status TEXT,
-                    vacant_status TEXT,
-                    key_hold TEXT,
-                    neighborhood TEXT,
-                    visit_frequency TEXT,
-                    memo TEXT
-                )
-            """)
-
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS cats (
-                    cat_id TEXT PRIMARY KEY,
-                    case_id TEXT REFERENCES cases(case_id) ON DELETE CASCADE,
-                    client_id TEXT REFERENCES clients(client_id) ON DELETE CASCADE,
-                    created_at TIMESTAMP,
-                    updated_at TIMESTAMP,
-                    cat_name TEXT,
-                    age TEXT,
-                    sex TEXT,
-                    health_memo TEXT,
-                    life_status TEXT,
-                    future_plan TEXT,
-                    memo TEXT
-                )
-            """)
-
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS family (
-                    family_id TEXT PRIMARY KEY,
-                    case_id TEXT REFERENCES cases(case_id) ON DELETE CASCADE,
-                    client_id TEXT REFERENCES clients(client_id) ON DELETE CASCADE,
-                    created_at TIMESTAMP,
-                    updated_at TIMESTAMP,
-                    name TEXT,
-                    relation TEXT,
-                    contact_ok TEXT,
-                    temperature TEXT,
-                    memo TEXT
-                )
-            """)
-
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS photos (
-                    photo_id TEXT PRIMARY KEY,
-                    case_id TEXT REFERENCES cases(case_id) ON DELETE CASCADE,
-                    client_id TEXT REFERENCES clients(client_id) ON DELETE CASCADE,
-                    created_at TIMESTAMP,
-                    photo_type TEXT,
-                    file_name TEXT,
-                    storage_note TEXT,
-                    memo TEXT
-                )
-            """)
-
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS ai_summaries (
-                    summary_id TEXT PRIMARY KEY,
-                    case_id TEXT REFERENCES cases(case_id) ON DELETE CASCADE,
-                    client_id TEXT REFERENCES clients(client_id) ON DELETE CASCADE,
-                    created_at TIMESTAMP,
-                    summary_type TEXT,
-                    source_text TEXT,
-                    summary_text TEXT,
-                    memo TEXT
-                )
-            """)
-
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS line_settings (
-                    setting_id TEXT PRIMARY KEY,
-                    created_at TIMESTAMP,
-                    updated_at TIMESTAMP,
-                    setting_name TEXT,
-                    setting_value TEXT,
-                    memo TEXT
-                )
-            """)
-
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS line_messages (
-                    message_id TEXT PRIMARY KEY,
-                    case_id TEXT REFERENCES cases(case_id) ON DELETE SET NULL,
-                    client_id TEXT REFERENCES clients(client_id) ON DELETE SET NULL,
-                    created_at TIMESTAMP,
-                    created_by TEXT,
-                    to_target TEXT,
-                    message_text TEXT,
-                    send_status TEXT,
-                    response_memo TEXT
-                )
-            """)
-
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS app_users (
-                    user_id TEXT PRIMARY KEY,
-                    created_at TIMESTAMP,
-                    updated_at TIMESTAMP,
-                    login_id TEXT UNIQUE NOT NULL,
-                    password_hash TEXT NOT NULL,
-                    role TEXT NOT NULL,
-                    display_name TEXT,
-                    active INTEGER DEFAULT 1
-                )
-            """)
-
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS audit_logs (
-                    audit_id TEXT PRIMARY KEY,
-                    created_at TIMESTAMP,
-                    login_id TEXT,
-                    action TEXT,
-                    table_name TEXT,
-                    record_id TEXT,
-                    memo TEXT
-                )
-            """)
-
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_cases_client_id ON cases(client_id)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_cases_status ON cases(status)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_cases_next_check_date ON cases(next_check_date)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_history_case_id ON history(case_id)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_properties_case_id ON properties(case_id)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_cats_case_id ON cats(case_id)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_family_case_id ON family(case_id)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_summaries_case_id ON ai_summaries(case_id)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_line_messages_case_id ON line_messages(case_id)")
-
-            cur.execute("SELECT COUNT(*) FROM app_users")
-            count = cur.fetchone()[0]
-            if count == 0:
-                cur.execute("""
-                    INSERT INTO app_users
-                    (user_id, created_at, updated_at, login_id, password_hash, role, display_name, active)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, 1)
-                """, (
-                    make_id("user"),
-                    now_text(),
-                    now_text(),
-                    "admin",
-                    hash_password("admin123"),
-                    "管理者",
-                    "管理者"
-                ))
-
-                cur.execute("""
-                    INSERT INTO app_users
-                    (user_id, created_at, updated_at, login_id, password_hash, role, display_name, active)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, 1)
-                """, (
-                    make_id("user"),
-                    now_text(),
-                    now_text(),
-                    "staff",
-                    hash_password("staff123"),
-                    "職員",
-                    "職員"
-                ))
+                INSERT INTO app_users
+                (user_id, created_at, updated_at, login_id, password_hash, role, display_name, active)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, 1)
+            """, (
+                make_id("user"),
+                now_text(),
+                now_text(),
+                "staff",
+                hash_password("staff123"),
+                "職員",
+                "職員"
+            ))
 
         conn.commit()
-
+    except Exception:
+        if conn:
+            conn.rollback()
+        raise
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
 
 # ============================================================
 # ログイン
 # ============================================================
 
 def login_screen():
-    st.title("🐾 にゃんとも相談管理 Ver3.0.9 安定稼働版")
+    st.title("🐾 にゃんとも相談管理 Ver3.1.0 DB層整理版")
     st.subheader("ログイン")
 
     with st.form("login_form"):
@@ -600,15 +641,15 @@ if not has_database_url():
 try:
     init_db()
 except Exception as e:
-    st.title("🐾 にゃんとも相談管理 Ver3.0.9 安定稼働版")
+    st.title("🐾 にゃんとも相談管理 Ver3.1.0 DB層整理版")
     st.error("PostgreSQLへの接続または初期化に失敗しました。")
     st.exception(e)
     st.stop()
 
 require_login()
 
-st.title("🐾 にゃんとも相談管理 Ver3.0.9 安定稼働版")
-st.caption("PostgreSQLリレーショナルDB版／安定稼働版")
+st.title("🐾 にゃんとも相談管理 Ver3.1.0 DB層整理版")
+st.caption("PostgreSQLリレーショナルDB版／DB接続層整理・安定稼働用")
 
 role = st.session_state.get("role", "職員")
 available_menus = ADMIN_MENUS if role == "管理者" else STAFF_MENUS
@@ -689,18 +730,18 @@ if menu == "管理ダッシュボード":
     clients = get_clients()
     cases = get_cases()
 
+    today_dt = date.today()
+    check_limit_dt = today_dt + timedelta(days=7)
+
     if not cases.empty:
-        active_mask = ~cases["status"].fillna("").isin(["終了"])
-        open_cases = cases[active_mask].copy()
+        active_mask = ~cases["status"].isin(["終了"])
+        open_cases = cases[active_mask]
 
-        today_ts = pd.Timestamp(date.today())
-        check_limit_ts = today_ts + pd.Timedelta(days=7)
-        next_dates = pd.to_datetime(cases["next_check_date"], errors="coerce")
-
+        next_dates = pd.to_datetime(cases["next_check_date"], errors="coerce").dt.date
         need_check = cases[
             active_mask &
             next_dates.notna() &
-            (next_dates <= check_limit_ts)
+            (next_dates <= check_limit_dt)
         ].copy()
 
         hearing_missing_cases = cases[
@@ -1353,29 +1394,6 @@ elif menu == "ログイン設定":
 
 elif menu == "データ確認":
     st.subheader("データ確認")
-
-    st.markdown("### 全体バックアップ")
-    backup_tables = [
-        "clients", "cases", "history", "properties", "cats", "family",
-        "ai_summaries", "line_messages", "audit_logs"
-    ]
-    try:
-        zip_buffer = io.BytesIO()
-        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-            for table_name in backup_tables:
-                df_backup = fetch_df(f"SELECT * FROM {table_name} ORDER BY 1")
-                zf.writestr(
-                    f"{table_name}.csv",
-                    df_backup.to_csv(index=False).encode("utf-8-sig")
-                )
-        st.download_button(
-            "全テーブルZIPバックアップをダウンロード",
-            zip_buffer.getvalue(),
-            file_name=f"nyantomo_backup_{date.today().strftime('%Y%m%d')}.zip",
-            mime="application/zip"
-        )
-    except Exception as e:
-        st.warning(f"バックアップ作成中に確認が必要です：{e}")
 
     tabs = st.tabs([
         "相談者",
