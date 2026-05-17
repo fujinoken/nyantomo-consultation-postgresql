@@ -10,7 +10,7 @@ import psycopg2.extras
 import streamlit as st
 
 # ============================================================
-# にゃんとも相談管理システム Ver3.0.1 PostgreSQL試作版
+# にゃんとも相談管理システム Ver3.0.2 PostgreSQL試作版
 # ------------------------------------------------------------
 # Ver2.4 SQLite版とは別アプリとして並行テストするための試作版
 #
@@ -35,12 +35,12 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="にゃんとも相談管理 Ver3.0.1 PostgreSQL試作版",
+    page_title="にゃんとも相談管理 Ver3.0.2 PostgreSQL試作版",
     page_icon="🐾",
     layout="wide"
 )
 
-APP_VERSION = "3.0.1 PostgreSQL試作版"
+APP_VERSION = "3.0.2 PostgreSQL試作版"
 
 ADMIN_MENUS = [
     "管理ダッシュボード",
@@ -175,7 +175,7 @@ def normalize_text(v):
 
 
 def show_db_setup_screen():
-    st.title("🐾 にゃんとも相談管理 Ver3.0.1 PostgreSQL試作版")
+    st.title("🐾 にゃんとも相談管理 Ver3.0.2 PostgreSQL試作版")
     st.error("PostgreSQL接続URLがまだ設定されていません。")
 
     st.markdown("""
@@ -256,6 +256,9 @@ def init_db():
                     free_memo TEXT,
                     internal_memo TEXT,
                     next_check TEXT,
+                    next_hearing_items TEXT,
+                    hearing_missing TEXT,
+                    do_not_do_now TEXT,
                     next_check_date DATE,
                     closed_date DATE,
                     close_reason TEXT,
@@ -416,6 +419,11 @@ def init_db():
             cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_summaries_case_id ON ai_summaries(case_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_line_messages_case_id ON line_messages(case_id)")
 
+            # 既存DBから更新した場合に備えて、ダッシュボード用の列を追加
+            cur.execute("ALTER TABLE cases ADD COLUMN IF NOT EXISTS next_hearing_items TEXT")
+            cur.execute("ALTER TABLE cases ADD COLUMN IF NOT EXISTS hearing_missing TEXT")
+            cur.execute("ALTER TABLE cases ADD COLUMN IF NOT EXISTS do_not_do_now TEXT")
+
             cur.execute("SELECT COUNT(*) FROM app_users")
             count = cur.fetchone()[0]
             if count == 0:
@@ -455,7 +463,7 @@ def init_db():
 # ============================================================
 
 def login_screen():
-    st.title("🐾 にゃんとも相談管理 Ver3.0.1 PostgreSQL試作版")
+    st.title("🐾 にゃんとも相談管理 Ver3.0.2 PostgreSQL試作版")
     st.subheader("ログイン")
 
     with st.form("login_form"):
@@ -540,6 +548,9 @@ def get_cases():
             c.free_memo,
             c.internal_memo,
             c.next_check,
+            c.next_hearing_items,
+            c.hearing_missing,
+            c.do_not_do_now,
             c.next_check_date,
             c.closed_date,
             c.close_reason,
@@ -592,14 +603,14 @@ if not has_database_url():
 try:
     init_db()
 except Exception as e:
-    st.title("🐾 にゃんとも相談管理 Ver3.0.1 PostgreSQL試作版")
+    st.title("🐾 にゃんとも相談管理 Ver3.0.2 PostgreSQL試作版")
     st.error("PostgreSQLへの接続または初期化に失敗しました。")
     st.exception(e)
     st.stop()
 
 require_login()
 
-st.title("🐾 にゃんとも相談管理 Ver3.0.1 PostgreSQL試作版")
+st.title("🐾 にゃんとも相談管理 Ver3.0.2 PostgreSQL試作版")
 st.caption("PostgreSQLリレーショナルDB版／Ver2.4 SQLite版とは別アプリとして並行テスト用")
 
 role = st.session_state.get("role", "職員")
@@ -681,29 +692,84 @@ if menu == "管理ダッシュボード":
     clients = get_clients()
     cases = get_cases()
 
-    today = today_text()
-    open_cases = cases[~cases["status"].isin(["終了"])] if not cases.empty else pd.DataFrame()
-    next_due = cases[
-        (cases["next_check_date"].notna()) &
-        (cases["next_check_date"].astype(str) <= today) &
-        (~cases["status"].isin(["終了"]))
-    ] if not cases.empty else pd.DataFrame()
+    today_dt = date.today()
+    check_limit_dt = today_dt + pd.Timedelta(days=7)
+
+    if not cases.empty:
+        active_mask = ~cases["status"].isin(["終了"])
+        open_cases = cases[active_mask]
+
+        next_dates = pd.to_datetime(cases["next_check_date"], errors="coerce").dt.date
+        need_check = cases[
+            active_mask &
+            next_dates.notna() &
+            (next_dates <= check_limit_dt)
+        ].copy()
+
+        hearing_missing_cases = cases[
+            active_mask &
+            cases["hearing_missing"].fillna("").astype(str).str.strip().ne("")
+        ].copy()
+
+        do_not_do_now_cases = cases[
+            active_mask &
+            cases["do_not_do_now"].fillna("").astype(str).str.strip().ne("")
+        ].copy()
+    else:
+        open_cases = pd.DataFrame()
+        need_check = pd.DataFrame()
+        hearing_missing_cases = pd.DataFrame()
+        do_not_do_now_cases = pd.DataFrame()
 
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("相談者数", len(clients))
     col2.metric("案件数", len(cases))
     col3.metric("進行中案件", len(open_cases))
-    col4.metric("次回確認期限", len(next_due))
+    col4.metric("要確認案件", len(need_check))
+
+    st.markdown("---")
+
+    st.markdown("### 要確認案件")
+    st.caption("次回確認日が今日から7日以内、または期限超過している進行中案件です。")
+    if need_check.empty:
+        st.info("要確認案件はありません。")
+    else:
+        cols = ["client_name", "case_title", "status", "next_check_date", "next_check"]
+        st.dataframe(need_check[cols], use_container_width=True)
+
+    st.markdown("---")
+
+    left_mid, right_mid = st.columns(2)
+
+    with left_mid:
+        st.markdown("### ヒアリング漏れがある案件")
+        st.caption("案件管理の『ヒアリング漏れ警告』に入力がある案件です。")
+        if hearing_missing_cases.empty:
+            st.success("ヒアリング漏れが登録されている案件はありません。")
+        else:
+            cols = ["client_name", "case_title", "status", "hearing_missing", "next_hearing_items"]
+            st.warning("確認が必要なヒアリング項目があります。")
+            st.dataframe(hearing_missing_cases[cols], use_container_width=True)
+
+    with right_mid:
+        st.markdown("### 今やらない方がいいことが登録されている案件")
+        st.caption("案件管理の『今やらない方がいいこと』に入力がある案件です。")
+        if do_not_do_now_cases.empty:
+            st.info("今やらない方がいいことが登録されている案件はありません。")
+        else:
+            cols = ["client_name", "case_title", "status", "do_not_do_now", "not_decide"]
+            st.warning("急がせないための注意事項があります。")
+            st.dataframe(do_not_do_now_cases[cols], use_container_width=True)
 
     st.markdown("---")
     left, right = st.columns(2)
 
     with left:
         st.markdown("### 次回確認が近い案件")
-        if next_due.empty:
-            st.info("期限が来ている案件はありません。")
+        if need_check.empty:
+            st.info("期限が近い案件はありません。")
         else:
-            st.dataframe(next_due[["client_name", "case_title", "status", "next_check_date", "next_check"]], use_container_width=True)
+            st.dataframe(need_check[["client_name", "case_title", "status", "next_check_date", "next_check"]], use_container_width=True)
 
     with right:
         st.markdown("### 状態別件数")
@@ -860,6 +926,9 @@ elif menu == "案件 登録・検索・更新・削除":
             free_memo = st.text_area("外部向けメモ")
             internal_memo = st.text_area("内部メモ")
             next_check = st.text_area("次回確認")
+            next_hearing_items = st.text_area("次回ヒアリング項目")
+            hearing_missing = st.text_area("ヒアリング漏れ警告")
+            do_not_do_now = st.text_area("今やらない方がいいこと")
             next_check_date = st.date_input("次回確認日", value=None)
             ok = st.form_submit_button("登録する")
 
@@ -874,11 +943,11 @@ elif menu == "案件 登録・検索・更新・削除":
                     INSERT INTO cases
                     (case_id, client_id, created_at, updated_at, consult_date, case_title, case_type, status,
                      current_state, house_state, cat_relation, family_gap, pressure, worries, not_decide,
-                     first_check, free_memo, internal_memo, next_check, next_check_date)
+                     first_check, free_memo, internal_memo, next_check, next_hearing_items, hearing_missing, do_not_do_now, next_check_date)
                     VALUES
                     (%(case_id)s, %(client_id)s, %(created_at)s, %(updated_at)s, %(consult_date)s, %(case_title)s, %(case_type)s, %(status)s,
                      %(current_state)s, %(house_state)s, %(cat_relation)s, %(family_gap)s, %(pressure)s, %(worries)s, %(not_decide)s,
-                     %(first_check)s, %(free_memo)s, %(internal_memo)s, %(next_check)s, %(next_check_date)s)
+                     %(first_check)s, %(free_memo)s, %(internal_memo)s, %(next_check)s, %(next_hearing_items)s, %(hearing_missing)s, %(do_not_do_now)s, %(next_check_date)s)
                 """, {
                     "case_id": case_id,
                     "client_id": client_id,
@@ -899,6 +968,9 @@ elif menu == "案件 登録・検索・更新・削除":
                     "free_memo": free_memo,
                     "internal_memo": internal_memo,
                     "next_check": next_check,
+                    "next_hearing_items": next_hearing_items,
+                    "hearing_missing": hearing_missing,
+                    "do_not_do_now": do_not_do_now,
                     "next_check_date": next_check_date,
                 })
 
@@ -917,7 +989,10 @@ elif menu == "案件 登録・検索・更新・削除":
             filtered["client_name"].astype(str).str.contains(keyword, na=False) |
             filtered["case_title"].astype(str).str.contains(keyword, na=False) |
             filtered["status"].astype(str).str.contains(keyword, na=False) |
-            filtered["internal_memo"].astype(str).str.contains(keyword, na=False)
+            filtered["internal_memo"].astype(str).str.contains(keyword, na=False) |
+            filtered["next_hearing_items"].astype(str).str.contains(keyword, na=False) |
+            filtered["hearing_missing"].astype(str).str.contains(keyword, na=False) |
+            filtered["do_not_do_now"].astype(str).str.contains(keyword, na=False)
         ]
 
     show_cols = ["case_id", "client_name", "case_title", "case_type", "status", "consult_date", "next_check_date", "updated_at"]
@@ -940,6 +1015,9 @@ elif menu == "案件 登録・検索・更新・削除":
             new_not_decide = st.text_area("今は決めないこと", str(row["not_decide"]))
             new_internal_memo = st.text_area("内部メモ", str(row["internal_memo"]))
             new_next_check = st.text_area("次回確認", str(row["next_check"]))
+            new_next_hearing_items = st.text_area("次回ヒアリング項目", str(row.get("next_hearing_items", "")))
+            new_hearing_missing = st.text_area("ヒアリング漏れ警告", str(row.get("hearing_missing", "")))
+            new_do_not_do_now = st.text_area("今やらない方がいいこと", str(row.get("do_not_do_now", "")))
             new_next_check_date = st.date_input("次回確認日", pd.to_datetime(row["next_check_date"]).date() if pd.notna(row["next_check_date"]) and str(row["next_check_date"]) else None)
             new_final_memo = st.text_area("終了・最終メモ", str(row["final_memo"]))
 
@@ -959,7 +1037,11 @@ elif menu == "案件 登録・検索・更新・削除":
                 SET updated_at=%(updated_at)s, case_title=%(case_title)s, case_type=%(case_type)s, status=%(status)s,
                     current_state=%(current_state)s, house_state=%(house_state)s, cat_relation=%(cat_relation)s,
                     family_gap=%(family_gap)s, pressure=%(pressure)s, worries=%(worries)s, not_decide=%(not_decide)s,
-                    internal_memo=%(internal_memo)s, next_check=%(next_check)s, next_check_date=%(next_check_date)s,
+                    internal_memo=%(internal_memo)s, next_check=%(next_check)s,
+                    next_hearing_items=%(next_hearing_items)s,
+                    hearing_missing=%(hearing_missing)s,
+                    do_not_do_now=%(do_not_do_now)s,
+                    next_check_date=%(next_check_date)s,
                     final_memo=%(final_memo)s
                 WHERE case_id=%(case_id)s
             """, {
@@ -976,6 +1058,9 @@ elif menu == "案件 登録・検索・更新・削除":
                 "not_decide": new_not_decide,
                 "internal_memo": new_internal_memo,
                 "next_check": new_next_check,
+                "next_hearing_items": new_next_hearing_items,
+                "hearing_missing": new_hearing_missing,
+                "do_not_do_now": new_do_not_do_now,
                 "next_check_date": new_next_check_date,
                 "final_memo": new_final_memo,
                 "case_id": selected,
