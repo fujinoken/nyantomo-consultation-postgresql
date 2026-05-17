@@ -2,6 +2,8 @@ import os
 import uuid
 import hashlib
 import hmac
+import io
+import zipfile
 from datetime import date, datetime
 
 import pandas as pd
@@ -10,7 +12,7 @@ import psycopg2.extras
 import streamlit as st
 
 # ============================================================
-# にゃんとも相談管理システム Ver3.0.2 PostgreSQL試作版
+# にゃんとも相談管理システム Ver3.0.9 安定稼働版
 # ------------------------------------------------------------
 # Ver2.4 SQLite版とは別アプリとして並行テストするための試作版
 #
@@ -35,12 +37,12 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="にゃんとも相談管理 Ver3.0.2 PostgreSQL試作版",
+    page_title="にゃんとも相談管理 Ver3.0.9 安定稼働版",
     page_icon="🐾",
     layout="wide"
 )
 
-APP_VERSION = "3.0.2 PostgreSQL試作版"
+APP_VERSION = "3.0.9 安定稼働版"
 
 ADMIN_MENUS = [
     "管理ダッシュボード",
@@ -175,7 +177,7 @@ def normalize_text(v):
 
 
 def show_db_setup_screen():
-    st.title("🐾 にゃんとも相談管理 Ver3.0.2 PostgreSQL試作版")
+    st.title("🐾 にゃんとも相談管理 Ver3.0.9 安定稼働版")
     st.error("PostgreSQL接続URLがまだ設定されていません。")
 
     st.markdown("""
@@ -419,11 +421,6 @@ def init_db():
             cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_summaries_case_id ON ai_summaries(case_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_line_messages_case_id ON line_messages(case_id)")
 
-            # 既存DBから更新した場合に備えて、ダッシュボード用の列を追加
-            cur.execute("ALTER TABLE cases ADD COLUMN IF NOT EXISTS next_hearing_items TEXT")
-            cur.execute("ALTER TABLE cases ADD COLUMN IF NOT EXISTS hearing_missing TEXT")
-            cur.execute("ALTER TABLE cases ADD COLUMN IF NOT EXISTS do_not_do_now TEXT")
-
             cur.execute("SELECT COUNT(*) FROM app_users")
             count = cur.fetchone()[0]
             if count == 0:
@@ -463,7 +460,7 @@ def init_db():
 # ============================================================
 
 def login_screen():
-    st.title("🐾 にゃんとも相談管理 Ver3.0.2 PostgreSQL試作版")
+    st.title("🐾 にゃんとも相談管理 Ver3.0.9 安定稼働版")
     st.subheader("ログイン")
 
     with st.form("login_form"):
@@ -603,15 +600,15 @@ if not has_database_url():
 try:
     init_db()
 except Exception as e:
-    st.title("🐾 にゃんとも相談管理 Ver3.0.2 PostgreSQL試作版")
+    st.title("🐾 にゃんとも相談管理 Ver3.0.9 安定稼働版")
     st.error("PostgreSQLへの接続または初期化に失敗しました。")
     st.exception(e)
     st.stop()
 
 require_login()
 
-st.title("🐾 にゃんとも相談管理 Ver3.0.2 PostgreSQL試作版")
-st.caption("PostgreSQLリレーショナルDB版／Ver2.4 SQLite版とは別アプリとして並行テスト用")
+st.title("🐾 にゃんとも相談管理 Ver3.0.9 安定稼働版")
+st.caption("PostgreSQLリレーショナルDB版／安定稼働版")
 
 role = st.session_state.get("role", "職員")
 available_menus = ADMIN_MENUS if role == "管理者" else STAFF_MENUS
@@ -692,18 +689,18 @@ if menu == "管理ダッシュボード":
     clients = get_clients()
     cases = get_cases()
 
-    today_dt = date.today()
-    check_limit_dt = today_dt + pd.Timedelta(days=7)
-
     if not cases.empty:
-        active_mask = ~cases["status"].isin(["終了"])
-        open_cases = cases[active_mask]
+        active_mask = ~cases["status"].fillna("").isin(["終了"])
+        open_cases = cases[active_mask].copy()
 
-        next_dates = pd.to_datetime(cases["next_check_date"], errors="coerce").dt.date
+        today_ts = pd.Timestamp(date.today())
+        check_limit_ts = today_ts + pd.Timedelta(days=7)
+        next_dates = pd.to_datetime(cases["next_check_date"], errors="coerce")
+
         need_check = cases[
             active_mask &
             next_dates.notna() &
-            (next_dates <= check_limit_dt)
+            (next_dates <= check_limit_ts)
         ].copy()
 
         hearing_missing_cases = cases[
@@ -1356,6 +1353,29 @@ elif menu == "ログイン設定":
 
 elif menu == "データ確認":
     st.subheader("データ確認")
+
+    st.markdown("### 全体バックアップ")
+    backup_tables = [
+        "clients", "cases", "history", "properties", "cats", "family",
+        "ai_summaries", "line_messages", "audit_logs"
+    ]
+    try:
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+            for table_name in backup_tables:
+                df_backup = fetch_df(f"SELECT * FROM {table_name} ORDER BY 1")
+                zf.writestr(
+                    f"{table_name}.csv",
+                    df_backup.to_csv(index=False).encode("utf-8-sig")
+                )
+        st.download_button(
+            "全テーブルZIPバックアップをダウンロード",
+            zip_buffer.getvalue(),
+            file_name=f"nyantomo_backup_{date.today().strftime('%Y%m%d')}.zip",
+            mime="application/zip"
+        )
+    except Exception as e:
+        st.warning(f"バックアップ作成中に確認が必要です：{e}")
 
     tabs = st.tabs([
         "相談者",
