@@ -1,5 +1,5 @@
 # config.py
-APP_TITLE = "にゃんとも相談管理 Ver3.2.3 安定運用版"
+APP_TITLE = "にゃんとも相談管理 Ver3.2.4 安定運用版"
 APP_CAPTION = "PostgreSQL版／DB層分離・監査ログ・バックアップ・Excel出力対応"
 
 ADMIN_ROLE = "管理者"

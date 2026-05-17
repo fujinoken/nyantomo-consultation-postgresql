@@ -671,7 +671,8 @@ def render_line_templates():
 
 def render_backup():
     st.subheader("バックアップ・出力")
-    st.caption("現在の主要テーブルをCSV ZIPまたはExcelで出力します。")
+    st.caption("現在の主要テーブルをCSV ZIPで出力します。Excel出力は openpyxl が利用できる場合のみ表示します。")
+
     data = {}
     for table, label in TABLES:
         try:
@@ -679,10 +680,12 @@ def render_backup():
         except Exception as e:
             data[label] = pd.DataFrame([{"error": str(e)}])
 
+    # CSV ZIPバックアップ：openpyxl不要で必ず動く
     csv_zip_buffer = BytesIO()
     with zipfile.ZipFile(csv_zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for label, df in data.items():
             zf.writestr(f"{label}.csv", df.to_csv(index=False).encode("utf-8-sig"))
+
     st.download_button(
         "全テーブルCSV ZIPダウンロード",
         csv_zip_buffer.getvalue(),
@@ -690,17 +693,33 @@ def render_backup():
         mime="application/zip"
     )
 
-    excel_buffer = BytesIO()
-    with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
-        for label, df in data.items():
-            sheet_name = label[:31]
-            df.to_excel(writer, index=False, sheet_name=sheet_name)
-    st.download_button(
-        "全テーブルExcelダウンロード",
-        excel_buffer.getvalue(),
-        file_name=f"nyantomo_backup_{today_text()}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+    st.markdown("---")
+    st.markdown("### Excel出力")
+
+    try:
+        import openpyxl  # noqa: F401
+
+        excel_buffer = BytesIO()
+        with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
+            for label, df in data.items():
+                sheet_name = label[:31]
+                df.to_excel(writer, index=False, sheet_name=sheet_name)
+
+        st.download_button(
+            "全テーブルExcelダウンロード",
+            excel_buffer.getvalue(),
+            file_name=f"nyantomo_backup_{today_text()}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+    except ModuleNotFoundError:
+        st.warning(
+            "Streamlit Cloud側に openpyxl が入っていないため、Excel出力は現在使えません。"
+            " CSV ZIPバックアップは利用できます。Excel出力を使う場合は requirements.txt に openpyxl を追加してください。"
+        )
+    except Exception as e:
+        st.error("Excel出力でエラーが発生しました。CSV ZIPバックアップをご利用ください。")
+        st.exception(e)
 
 
 def render_data_check():
