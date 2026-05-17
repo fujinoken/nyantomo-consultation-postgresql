@@ -10,7 +10,7 @@ import psycopg2.extras
 import streamlit as st
 
 # ============================================================
-# にゃんとも相談管理システム Ver3.1.0 DB層整理版
+# にゃんとも相談管理システム Ver3.1.1 DB層整理版
 # ------------------------------------------------------------
 # DB層整理版：PostgreSQL接続を明示的に開閉し、安定稼働を優先
 #
@@ -35,12 +35,12 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="にゃんとも相談管理 Ver3.1.0 DB層整理版",
+    page_title="にゃんとも相談管理 Ver3.1.1 DB層整理版",
     page_icon="🐾",
     layout="wide"
 )
 
-APP_VERSION = "3.1.0 DB層整理版"
+APP_VERSION = "3.1.1 DB層整理版"
 
 ADMIN_MENUS = [
     "管理ダッシュボード",
@@ -204,7 +204,7 @@ def normalize_text(v):
 
 
 def show_db_setup_screen():
-    st.title("🐾 にゃんとも相談管理 Ver3.1.0 DB層整理版")
+    st.title("🐾 にゃんとも相談管理 Ver3.1.1 DB層整理版")
     st.error("PostgreSQL接続URLがまだ設定されていません。")
 
     st.markdown("""
@@ -501,7 +501,7 @@ def init_db():
 # ============================================================
 
 def login_screen():
-    st.title("🐾 にゃんとも相談管理 Ver3.1.0 DB層整理版")
+    st.title("🐾 にゃんとも相談管理 Ver3.1.1 DB層整理版")
     st.subheader("ログイン")
 
     with st.form("login_form"):
@@ -641,14 +641,14 @@ if not has_database_url():
 try:
     init_db()
 except Exception as e:
-    st.title("🐾 にゃんとも相談管理 Ver3.1.0 DB層整理版")
+    st.title("🐾 にゃんとも相談管理 Ver3.1.1 DB層整理版")
     st.error("PostgreSQLへの接続または初期化に失敗しました。")
     st.exception(e)
     st.stop()
 
 require_login()
 
-st.title("🐾 にゃんとも相談管理 Ver3.1.0 DB層整理版")
+st.title("🐾 にゃんとも相談管理 Ver3.1.1 DB層整理版")
 st.caption("PostgreSQLリレーショナルDB版／DB接続層整理・安定稼働用")
 
 role = st.session_state.get("role", "職員")
@@ -730,34 +730,56 @@ if menu == "管理ダッシュボード":
     clients = get_clients()
     cases = get_cases()
 
-    today_dt = date.today()
-    check_limit_dt = today_dt + timedelta(days=7)
-
+    # ダッシュボードの日付判定はPostgreSQL側で処理します。
+    # pandas側で date / datetime64 を比較しないため、TypeError を防ぎます。
     if not cases.empty:
-        active_mask = ~cases["status"].isin(["終了"])
-        open_cases = cases[active_mask]
-
-        next_dates = pd.to_datetime(cases["next_check_date"], errors="coerce").dt.date
-        need_check = cases[
-            active_mask &
-            next_dates.notna() &
-            (next_dates <= check_limit_dt)
-        ].copy()
-
-        hearing_missing_cases = cases[
-            active_mask &
-            cases["hearing_missing"].fillna("").astype(str).str.strip().ne("")
-        ].copy()
-
-        do_not_do_now_cases = cases[
-            active_mask &
-            cases["do_not_do_now"].fillna("").astype(str).str.strip().ne("")
-        ].copy()
+        active_mask = ~cases["status"].fillna("").isin(["終了"])
+        open_cases = cases[active_mask].copy()
     else:
         open_cases = pd.DataFrame()
-        need_check = pd.DataFrame()
-        hearing_missing_cases = pd.DataFrame()
-        do_not_do_now_cases = pd.DataFrame()
+
+    need_check = fetch_df("""
+        SELECT
+            cl.name AS client_name,
+            c.case_title,
+            c.status,
+            c.next_check_date,
+            c.next_check
+        FROM cases c
+        JOIN clients cl ON c.client_id = cl.client_id
+        WHERE COALESCE(c.status, '') <> '終了'
+          AND c.next_check_date IS NOT NULL
+          AND c.next_check_date <= CURRENT_DATE + INTERVAL '7 days'
+        ORDER BY c.next_check_date ASC, c.updated_at DESC NULLS LAST
+    """)
+
+    hearing_missing_cases = fetch_df("""
+        SELECT
+            cl.name AS client_name,
+            c.case_title,
+            c.status,
+            c.hearing_missing,
+            c.next_hearing_items
+        FROM cases c
+        JOIN clients cl ON c.client_id = cl.client_id
+        WHERE COALESCE(c.status, '') <> '終了'
+          AND NULLIF(TRIM(COALESCE(c.hearing_missing, '')), '') IS NOT NULL
+        ORDER BY c.updated_at DESC NULLS LAST
+    """)
+
+    do_not_do_now_cases = fetch_df("""
+        SELECT
+            cl.name AS client_name,
+            c.case_title,
+            c.status,
+            c.do_not_do_now,
+            c.not_decide
+        FROM cases c
+        JOIN clients cl ON c.client_id = cl.client_id
+        WHERE COALESCE(c.status, '') <> '終了'
+          AND NULLIF(TRIM(COALESCE(c.do_not_do_now, '')), '') IS NOT NULL
+        ORDER BY c.updated_at DESC NULLS LAST
+    """)
 
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("相談者数", len(clients))
