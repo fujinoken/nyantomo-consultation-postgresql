@@ -716,7 +716,13 @@ def related_card_page(table_name, id_col, title, fields):
     with st.form(f"{table_name}_create"):
         values = {}
         for key, label, kind in fields:
-            if kind == "area":
+            if card_type == "支援者カード" and key == "field_1":
+                values[key] = st.selectbox(label, SUPPORT_CATEGORY_OPTIONS)
+            elif card_type == "支援者カード" and key == "field_5":
+                values[key] = st.selectbox(label, ["◎ 協力的", "○ 通常", "△ 慎重", "－ 未接続", "要注意", "不明"])
+            elif card_type == "支援者カード" and key == "field_6":
+                values[key] = st.selectbox(label, ["未連携", "連携候補", "連携中", "安定連携", "一時停止", "終了"])
+            elif kind == "area":
                 values[key] = st.text_area(label)
             else:
                 values[key] = st.text_input(label)
@@ -1575,7 +1581,36 @@ GUARDIAN_CARD_TYPES = {
     ],
 }
 
-RESOURCE_STATUS_OPTIONS = ["未接続", "要確認", "利用中", "安定", "過剰気味", "不明"]
+RESOURCE_STATUS_OPTIONS = ["◎ 安定", "○ 利用中", "△ 要確認", "－ 未接続", "＋ 過剰気味", "□ 不明"]
+RESOURCE_STATUS_LEGACY_MAP = {
+    "安定": "◎ 安定",
+    "利用中": "○ 利用中",
+    "要確認": "△ 要確認",
+    "未接続": "－ 未接続",
+    "過剰気味": "＋ 過剰気味",
+    "不明": "□ 不明",
+}
+SUPPORT_CATEGORY_OPTIONS = [
+    "包括", "ケアマネ", "主治医", "宅建士", "司法書士", "動物病院",
+    "訪問看護", "ヘルパー", "デイサービス", "ショートステイ",
+    "施設担当者", "社協", "行政", "弁護士", "税理士", "行政書士",
+    "不動産会社", "管理会社", "猫ボランティア", "家族", "親族", "その他"
+]
+
+def resource_display(value):
+    value = normalize_text(value)
+    if not value:
+        return "□ 不明"
+    if value in RESOURCE_STATUS_OPTIONS:
+        return value
+    return RESOURCE_STATUS_LEGACY_MAP.get(value, value)
+
+def resource_symbol(value):
+    return resource_display(value).split(" ")[0]
+
+def resource_text(value):
+    parts = resource_display(value).split(" ", 1)
+    return parts[1] if len(parts) > 1 else resource_display(value)
 CONFIDENTIALITY_OPTIONS = ["通常", "注意", "高", "最重要"]
 GUARDIAN_STATUS_OPTIONS = ["準備中", "受任中", "見守り中", "要確認", "終了"]
 EMERGENCY_OPTIONS = ["低", "中", "高", "緊急"]
@@ -1628,6 +1663,9 @@ def render_guardian_dashboard():
         ORDER BY r.updated_at DESC NULLS LAST, r.created_at DESC
         LIMIT 50
     """)
+    if not maps.empty:
+        for col in ["family_status", "medical_status", "care_status", "housing_status", "asset_status", "pet_status", "professional_status"]:
+            maps[col] = maps[col].apply(resource_display)
     safe_df_display(maps, "リソース地図はまだ登録されていません。", height=260)
 
 
@@ -1802,7 +1840,30 @@ def render_guardian_resource_map():
 
     st.markdown("---")
     df = fetch_df("SELECT * FROM guardian_resource_map WHERE ward_id=%(ward_id)s ORDER BY updated_at DESC NULLS LAST, created_at DESC", {"ward_id": ward_id})
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    if not df.empty:
+        latest = df.iloc[0]
+        st.markdown("### 最新リソース地図")
+        cols = st.columns(7)
+        items = [
+            ("家族", latest.get("family_status", "")),
+            ("医療", latest.get("medical_status", "")),
+            ("介護", latest.get("care_status", "")),
+            ("住まい", latest.get("housing_status", "")),
+            ("財産", latest.get("asset_status", "")),
+            ("猫", latest.get("pet_status", "")),
+            ("専門職", latest.get("professional_status", "")),
+        ]
+        for col, (label, value) in zip(cols, items):
+            col.metric(label, resource_symbol(value), help=resource_text(value))
+        st.info(f"総合状態：{normalize_text(latest.get('overall_status', '')) or '未設定'}")
+
+        show_df = df.copy()
+        for col in ["family_status", "medical_status", "care_status", "housing_status", "asset_status", "pet_status", "professional_status"]:
+            show_df[col] = show_df[col].apply(resource_display)
+        st.markdown("### 履歴")
+        st.dataframe(show_df, use_container_width=True, hide_index=True)
+    else:
+        st.info("リソース地図はまだ登録されていません。")
 
 
 def render_guardian_interviews():
@@ -1933,6 +1994,62 @@ def render_guardian_data_check():
             st.download_button(f"{label}CSVダウンロード", df.to_csv(index=False).encode("utf-8-sig"), file_name=f"{table}.csv", mime="text/csv")
 
 
+
+def render_db_connection_check():
+    st.subheader("データベース接続確認")
+    st.caption("PostgreSQL接続、主要テーブル、追加テーブル、OpenAI設定、自動バックアップ設定を確認します。")
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("DATABASE_URL", "設定あり" if has_database_url() else "未設定")
+    c2.metric("OpenAI API", "設定あり" if get_openai_api_key() else "未設定")
+    c3.metric("AIモデル", get_openai_model())
+    c4.metric("自動バックアップ", f"{get_secret_value('AUTO_BACKUP_HOURS', DEFAULT_AUTO_BACKUP_HOURS)}時間")
+
+    st.markdown("---")
+    st.markdown("### PostgreSQL疎通テスト")
+    try:
+        info = fetch_one("SELECT version() AS version, current_database() AS database_name, current_user AS user_name, NOW() AS server_time")
+        st.success("PostgreSQLへの接続に成功しています。")
+        st.json({
+            "database": info.get("database_name", ""),
+            "user": info.get("user_name", ""),
+            "server_time": str(info.get("server_time", "")),
+            "version": str(info.get("version", ""))[:180],
+        })
+    except Exception as e:
+        st.error("PostgreSQLへの接続確認に失敗しました。")
+        st.exception(e)
+        return
+
+    st.markdown("### 主要テーブル確認")
+    check_tables = [
+        "clients", "cases", "history", "properties", "cats", "family",
+        "ai_summaries", "nyantomo_backup_logs",
+        "guardian_wards", "guardian_cards", "guardian_resource_map",
+        "guardian_interview_logs", "guardian_ai_support"
+    ]
+    rows = []
+    for table in check_tables:
+        try:
+            row = fetch_one(f"SELECT COUNT(*) AS cnt FROM {table}")
+            rows.append({"テーブル": table, "状態": "OK", "件数": int(row.get("cnt", 0)), "メモ": ""})
+        except Exception as e:
+            rows.append({"テーブル": table, "状態": "NG", "件数": "", "メモ": str(e)[:120]})
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    st.markdown("### バックアップ状態")
+    try:
+        last = fetch_one("SELECT created_at, backup_type, file_name FROM nyantomo_backup_logs ORDER BY created_at DESC LIMIT 1")
+        if last:
+            st.info(f"最終バックアップ：{last.get('created_at')} / {last.get('backup_type')} / {last.get('file_name')}")
+        else:
+            st.warning("バックアップログはまだありません。")
+    except Exception as e:
+        st.warning(f"バックアップログ確認に失敗しました：{e}")
+
+    if st.button("接続確認を再実行"):
+        st.rerun()
+
 def render_data_check():
     st.subheader("データ確認")
     tabs = st.tabs([label for _, label in TABLES])
@@ -2040,6 +2157,7 @@ else:
     available_menus = STAFF_MENUS
 
 GUARDIAN_MENUS = [
+    "DB接続確認",
     "後見ダッシュボード",
     "後見｜被後見人",
     "後見｜本人希望カード",
@@ -2064,7 +2182,9 @@ for m in GUARDIAN_MENUS:
 menu = st.sidebar.radio("メニュー", available_menus)
 logout_button()
 
-if menu == "管理ダッシュボード":
+if menu == "DB接続確認":
+    render_db_connection_check()
+elif menu == "管理ダッシュボード":
     render_dashboard()
 elif menu == "相談者 登録・検索・更新・削除":
     render_clients()
