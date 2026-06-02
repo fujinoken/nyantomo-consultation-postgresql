@@ -900,6 +900,115 @@ def ensure_extension_tables():
         pass
 
 
+
+    # ========================================================
+    # 後見モード Ver1.0 追加テーブル
+    # ========================================================
+    execute("""
+        CREATE TABLE IF NOT EXISTS guardian_wards (
+            ward_id TEXT PRIMARY KEY,
+            created_at TIMESTAMP,
+            updated_at TIMESTAMP,
+            created_by TEXT,
+            confidentiality_level TEXT,
+            status TEXT,
+            name TEXT NOT NULL,
+            birth_date DATE,
+            address TEXT,
+            phone TEXT,
+            facility_name TEXT,
+            guardian_type TEXT,
+            petitioner TEXT,
+            court_name TEXT,
+            guardian_name TEXT,
+            start_date DATE,
+            end_date DATE,
+            emergency_level TEXT,
+            next_check_date DATE,
+            memo TEXT
+        )
+    """)
+    execute("""
+        CREATE TABLE IF NOT EXISTS guardian_cards (
+            card_id TEXT PRIMARY KEY,
+            ward_id TEXT REFERENCES guardian_wards(ward_id) ON DELETE CASCADE,
+            created_at TIMESTAMP,
+            updated_at TIMESTAMP,
+            updated_by TEXT,
+            card_type TEXT,
+            confidentiality_level TEXT,
+            status TEXT,
+            related_card_id TEXT,
+            title TEXT,
+            field_1 TEXT,
+            field_2 TEXT,
+            field_3 TEXT,
+            field_4 TEXT,
+            field_5 TEXT,
+            field_6 TEXT,
+            field_7 TEXT,
+            field_8 TEXT,
+            field_9 TEXT,
+            field_10 TEXT,
+            memo TEXT
+        )
+    """)
+    execute("""
+        CREATE TABLE IF NOT EXISTS guardian_interview_logs (
+            log_id TEXT PRIMARY KEY,
+            ward_id TEXT REFERENCES guardian_wards(ward_id) ON DELETE CASCADE,
+            created_at TIMESTAMP,
+            updated_at TIMESTAMP,
+            updated_by TEXT,
+            confidentiality_level TEXT,
+            interview_date DATE,
+            place TEXT,
+            content TEXT,
+            ward_words TEXT,
+            family_words TEXT,
+            action_taken TEXT,
+            next_check TEXT,
+            memo TEXT
+        )
+    """)
+    execute("""
+        CREATE TABLE IF NOT EXISTS guardian_resource_map (
+            map_id TEXT PRIMARY KEY,
+            ward_id TEXT REFERENCES guardian_wards(ward_id) ON DELETE CASCADE,
+            created_at TIMESTAMP,
+            updated_at TIMESTAMP,
+            updated_by TEXT,
+            confidentiality_level TEXT,
+            family_status TEXT,
+            medical_status TEXT,
+            care_status TEXT,
+            housing_status TEXT,
+            asset_status TEXT,
+            pet_status TEXT,
+            professional_status TEXT,
+            overall_status TEXT,
+            shortage_memo TEXT,
+            enough_memo TEXT,
+            do_not_add_memo TEXT,
+            next_check TEXT,
+            memo TEXT
+        )
+    """)
+    execute("""
+        CREATE TABLE IF NOT EXISTS guardian_ai_support (
+            ai_id TEXT PRIMARY KEY,
+            ward_id TEXT REFERENCES guardian_wards(ward_id) ON DELETE CASCADE,
+            created_at TIMESTAMP,
+            updated_by TEXT,
+            support_type TEXT,
+            source_text TEXT,
+            result_text TEXT,
+            model TEXT,
+            memo TEXT
+        )
+    """)
+
+
 def get_backup_tables():
     """config.TABLESに存在する主要テーブルをバックアップ対象にする。"""
     seen = set()
@@ -908,7 +1017,7 @@ def get_backup_tables():
         if table not in seen:
             tables.append((table, label))
             seen.add(table)
-    for table, label in [("nyantomo_backup_logs", "自動バックアップログ")]:
+    for table, label in [("nyantomo_backup_logs", "自動バックアップログ"), ("guardian_wards", "後見_被後見人"), ("guardian_cards", "後見_カード"), ("guardian_interview_logs", "後見_面談記録"), ("guardian_resource_map", "後見_リソース地図"), ("guardian_ai_support", "後見_AI支援")]:
         if table not in seen:
             tables.append((table, label))
     return tables
@@ -1370,6 +1479,460 @@ def render_backup():
         st.exception(e)
 
 
+
+# ============================================================
+# 後見モード Ver1.0
+# ============================================================
+
+GUARDIAN_CARD_TYPES = {
+    "本人希望カード": [
+        ("field_1", "好きなこと", "area"),
+        ("field_2", "嫌いなこと", "area"),
+        ("field_3", "大切にしていること", "area"),
+        ("field_4", "生活歴", "area"),
+        ("field_5", "宗教・価値観", "text"),
+        ("field_6", "延命治療意向", "area"),
+        ("field_7", "施設希望", "area"),
+        ("field_8", "住まい希望", "area"),
+        ("field_9", "ペット希望", "area"),
+        ("field_10", "本人の言葉", "area"),
+    ],
+    "家族カード": [
+        ("field_1", "氏名", "text"),
+        ("field_2", "続柄", "text"),
+        ("field_3", "連絡先", "text"),
+        ("field_4", "協力度", "text"),
+        ("field_5", "温度感", "text"),
+        ("field_6", "面会頻度", "text"),
+        ("field_7", "注意事項", "area"),
+    ],
+    "医療カード": [
+        ("field_1", "主治医", "text"),
+        ("field_2", "病院", "text"),
+        ("field_3", "診断名", "area"),
+        ("field_4", "服薬", "area"),
+        ("field_5", "訪問看護", "text"),
+        ("field_6", "救急搬送先", "text"),
+        ("field_7", "ACP状況", "area"),
+    ],
+    "介護カード": [
+        ("field_1", "ケアマネ", "text"),
+        ("field_2", "事業所", "text"),
+        ("field_3", "ヘルパー", "text"),
+        ("field_4", "デイサービス", "text"),
+        ("field_5", "ショートステイ", "text"),
+        ("field_6", "施設担当者", "text"),
+        ("field_7", "介護メモ", "area"),
+    ],
+    "財産カード": [
+        ("field_1", "年金", "area"),
+        ("field_2", "預金", "area"),
+        ("field_3", "保険", "area"),
+        ("field_4", "不動産", "area"),
+        ("field_5", "負債", "area"),
+        ("field_6", "定期支払", "area"),
+        ("field_7", "公共料金", "area"),
+        ("field_8", "口座管理", "area"),
+    ],
+    "住まいカード": [
+        ("field_1", "自宅", "area"),
+        ("field_2", "施設", "area"),
+        ("field_3", "空き家", "area"),
+        ("field_4", "賃貸", "area"),
+        ("field_5", "管理状況", "area"),
+        ("field_6", "鍵管理", "area"),
+    ],
+    "ペットカード": [
+        ("field_1", "猫情報", "area"),
+        ("field_2", "動物病院", "text"),
+        ("field_3", "預かり候補", "area"),
+        ("field_4", "緊急時対応", "area"),
+        ("field_5", "飼養継続計画", "area"),
+    ],
+    "支援者カード": [
+        ("field_1", "区分", "text"),
+        ("field_2", "氏名・機関名", "text"),
+        ("field_3", "連絡先", "text"),
+        ("field_4", "役割", "area"),
+        ("field_5", "温度感", "text"),
+        ("field_6", "連携状況", "text"),
+        ("field_7", "注意事項", "area"),
+    ],
+    "判断保留カード": [
+        ("field_1", "まだ決めないこと", "area"),
+        ("field_2", "判断時期", "text"),
+        ("field_3", "保留する理由", "area"),
+        ("field_4", "見守り方", "area"),
+        ("field_5", "急がせないための注意点", "area"),
+    ],
+    "家庭裁判所対応カード": [
+        ("field_1", "報告書作成メモ", "area"),
+        ("field_2", "収支状況", "area"),
+        ("field_3", "財産変動", "area"),
+        ("field_4", "重要事項", "area"),
+        ("field_5", "年次報告管理", "area"),
+        ("field_6", "次回提出期限", "text"),
+    ],
+}
+
+RESOURCE_STATUS_OPTIONS = ["未接続", "要確認", "利用中", "安定", "過剰気味", "不明"]
+CONFIDENTIALITY_OPTIONS = ["通常", "注意", "高", "最重要"]
+GUARDIAN_STATUS_OPTIONS = ["準備中", "受任中", "見守り中", "要確認", "終了"]
+EMERGENCY_OPTIONS = ["低", "中", "高", "緊急"]
+
+
+def get_guardian_wards():
+    return fetch_df("""
+        SELECT * FROM guardian_wards
+        ORDER BY COALESCE(next_check_date, DATE '2999-12-31') ASC, updated_at DESC NULLS LAST, created_at DESC
+    """)
+
+
+def get_guardian_ward_options():
+    df = get_guardian_wards()
+    mapping, labels = {}, []
+    for _, r in df.iterrows():
+        label = f"{r['name']}｜{r.get('guardian_type','')}｜{r.get('status','')}｜{r['ward_id']}"
+        labels.append(label)
+        mapping[label] = r["ward_id"]
+    return mapping, labels
+
+
+def render_guardian_dashboard():
+    st.subheader("後見モード ダッシュボード")
+    st.caption("本人・家族・医療・介護・財産・住まい・猫・専門職を、抱え込まずに見える化します。")
+
+    counts = fetch_one("""
+        SELECT
+            (SELECT COUNT(*) FROM guardian_wards) AS wards_count,
+            (SELECT COUNT(*) FROM guardian_wards WHERE COALESCE(status,'') <> '終了') AS active_count,
+            (SELECT COUNT(*) FROM guardian_cards) AS cards_count,
+            (SELECT COUNT(*) FROM guardian_wards WHERE next_check_date IS NOT NULL AND next_check_date <= CURRENT_DATE + INTERVAL '7 days') AS need_check_count
+    """)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("被後見人", int(counts.get("wards_count", 0)))
+    c2.metric("進行中", int(counts.get("active_count", 0)))
+    c3.metric("カード数", int(counts.get("cards_count", 0)))
+    c4.metric("7日以内確認", int(counts.get("need_check_count", 0)))
+
+    st.markdown("---")
+    wards = get_guardian_wards()
+    safe_df_display(wards, "被後見人はまだ登録されていません。", ["ward_id", "name", "guardian_type", "status", "emergency_level", "next_check_date", "updated_at"], height=260)
+
+    st.markdown("### リソース地図一覧")
+    maps = fetch_df("""
+        SELECT w.name, r.family_status, r.medical_status, r.care_status, r.housing_status, r.asset_status,
+               r.pet_status, r.professional_status, r.overall_status, r.next_check, r.updated_at
+        FROM guardian_resource_map r
+        JOIN guardian_wards w ON r.ward_id = w.ward_id
+        ORDER BY r.updated_at DESC NULLS LAST, r.created_at DESC
+        LIMIT 50
+    """)
+    safe_df_display(maps, "リソース地図はまだ登録されていません。", height=260)
+
+
+def render_guardian_wards():
+    st.subheader("被後見人 登録・検索・更新")
+    with st.form("guardian_ward_create"):
+        c1, c2 = st.columns(2)
+        with c1:
+            name = st.text_input("氏名")
+            birth_date = st.date_input("生年月日", value=None)
+            address = st.text_area("住所")
+            phone = st.text_input("電話番号")
+            facility_name = st.text_input("施設名")
+            guardian_type = st.selectbox("後見種別", ["未選択", "成年後見", "保佐", "補助", "任意後見", "その他"])
+        with c2:
+            petitioner = st.text_input("申立人")
+            court_name = st.text_input("担当裁判所")
+            guardian_name = st.text_input("担当後見人")
+            start_date = st.date_input("担当開始日", value=None)
+            status = st.selectbox("状態", GUARDIAN_STATUS_OPTIONS)
+            emergency_level = st.selectbox("緊急度", EMERGENCY_OPTIONS)
+            next_check_date = st.date_input("次回確認日", value=None)
+        memo = st.text_area("備考")
+        ok = st.form_submit_button("登録する", disabled=not can_write())
+    if ok:
+        if not name.strip():
+            st.error("氏名を入力してください。")
+        else:
+            ward_id = make_id("ward")
+            execute("""
+                INSERT INTO guardian_wards
+                (ward_id, created_at, updated_at, created_by, confidentiality_level, status, name, birth_date, address, phone,
+                 facility_name, guardian_type, petitioner, court_name, guardian_name, start_date, emergency_level, next_check_date, memo)
+                VALUES (%(ward_id)s, %(created_at)s, %(updated_at)s, %(created_by)s, %(confidentiality_level)s, %(status)s, %(name)s, %(birth_date)s, %(address)s, %(phone)s,
+                 %(facility_name)s, %(guardian_type)s, %(petitioner)s, %(court_name)s, %(guardian_name)s, %(start_date)s, %(emergency_level)s, %(next_check_date)s, %(memo)s)
+            """, {
+                "ward_id": ward_id, "created_at": now_text(), "updated_at": now_text(), "created_by": st.session_state.get("login_id", ""),
+                "confidentiality_level": "高", "status": status, "name": name.strip(), "birth_date": birth_date, "address": address,
+                "phone": phone, "facility_name": facility_name, "guardian_type": guardian_type, "petitioner": petitioner,
+                "court_name": court_name, "guardian_name": guardian_name, "start_date": start_date, "emergency_level": emergency_level,
+                "next_check_date": next_check_date, "memo": memo,
+            })
+            log_action("create", "guardian_wards", ward_id, "被後見人登録")
+            st.success("被後見人を登録しました。")
+            st.rerun()
+
+    st.markdown("---")
+    keyword = st.text_input("検索語", key="guardian_ward_search")
+    df = get_guardian_wards()
+    if keyword and not df.empty:
+        df = df[df.astype(str).apply(lambda row: row.str.contains(keyword, case=False, na=False).any(), axis=1)]
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+    if not df.empty and can_write():
+        selected = st.selectbox("更新する被後見人ID", df["ward_id"].tolist())
+        row = df[df["ward_id"] == selected].iloc[0]
+        with st.form("guardian_ward_edit"):
+            new_status = st.selectbox("状態", GUARDIAN_STATUS_OPTIONS, index=GUARDIAN_STATUS_OPTIONS.index(row["status"]) if row["status"] in GUARDIAN_STATUS_OPTIONS else 0)
+            new_emergency = st.selectbox("緊急度", EMERGENCY_OPTIONS, index=EMERGENCY_OPTIONS.index(row["emergency_level"]) if row["emergency_level"] in EMERGENCY_OPTIONS else 0)
+            new_next = st.date_input("次回確認日", date_or_none(row["next_check_date"]))
+            new_memo = st.text_area("備考", normalize_text(row["memo"]))
+            update = st.form_submit_button("更新する")
+        if update:
+            execute("""
+                UPDATE guardian_wards
+                SET updated_at=%(updated_at)s, status=%(status)s, emergency_level=%(emergency_level)s, next_check_date=%(next_check_date)s, memo=%(memo)s
+                WHERE ward_id=%(ward_id)s
+            """, {"updated_at": now_text(), "status": new_status, "emergency_level": new_emergency, "next_check_date": new_next, "memo": new_memo, "ward_id": selected})
+            log_action("update", "guardian_wards", selected, "被後見人更新")
+            st.success("更新しました。")
+            st.rerun()
+
+
+def render_guardian_card(card_type):
+    st.subheader(card_type)
+    ward_map, ward_labels = get_guardian_ward_options()
+    if not ward_labels:
+        st.warning("先に被後見人を登録してください。")
+        return
+    selected_label = st.selectbox("対象被後見人", ward_labels, key=f"{card_type}_ward")
+    ward_id = ward_map[selected_label]
+    fields = GUARDIAN_CARD_TYPES[card_type]
+
+    with st.form(f"guardian_card_create_{card_type}"):
+        confidentiality_level = st.selectbox("機密レベル", CONFIDENTIALITY_OPTIONS, index=1)
+        status = st.selectbox("ステータス", ["未確認", "確認中", "安定", "要確認", "終了"])
+        title = st.text_input("タイトル", value=card_type)
+        values = {}
+        for key, label, kind in fields:
+            if kind == "area":
+                values[key] = st.text_area(label)
+            else:
+                values[key] = st.text_input(label)
+        memo = st.text_area("備考")
+        ok = st.form_submit_button("登録する", disabled=not can_write())
+    if ok:
+        card_id = make_id("gcard")
+        params = {
+            "card_id": card_id, "ward_id": ward_id, "created_at": now_text(), "updated_at": now_text(),
+            "updated_by": st.session_state.get("login_id", ""), "card_type": card_type,
+            "confidentiality_level": confidentiality_level, "status": status, "related_card_id": "", "title": title,
+            "memo": memo,
+        }
+        for i in range(1, 11):
+            params[f"field_{i}"] = values.get(f"field_{i}", "")
+        execute("""
+            INSERT INTO guardian_cards
+            (card_id, ward_id, created_at, updated_at, updated_by, card_type, confidentiality_level, status, related_card_id, title,
+             field_1, field_2, field_3, field_4, field_5, field_6, field_7, field_8, field_9, field_10, memo)
+            VALUES
+            (%(card_id)s, %(ward_id)s, %(created_at)s, %(updated_at)s, %(updated_by)s, %(card_type)s, %(confidentiality_level)s, %(status)s, %(related_card_id)s, %(title)s,
+             %(field_1)s, %(field_2)s, %(field_3)s, %(field_4)s, %(field_5)s, %(field_6)s, %(field_7)s, %(field_8)s, %(field_9)s, %(field_10)s, %(memo)s)
+        """, params)
+        log_action("create", "guardian_cards", card_id, f"{card_type}登録")
+        st.success("登録しました。")
+        st.rerun()
+
+    st.markdown("---")
+    df = fetch_df("SELECT * FROM guardian_cards WHERE ward_id=%(ward_id)s AND card_type=%(card_type)s ORDER BY updated_at DESC NULLS LAST, created_at DESC", {"ward_id": ward_id, "card_type": card_type})
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+
+def render_guardian_resource_map():
+    st.subheader("リソース地図")
+    st.caption("不足だけでなく、十分な支え・今は足さなくてよい支援も見える化します。")
+    ward_map, ward_labels = get_guardian_ward_options()
+    if not ward_labels:
+        st.warning("先に被後見人を登録してください。")
+        return
+    selected_label = st.selectbox("対象被後見人", ward_labels, key="guardian_resource_ward")
+    ward_id = ward_map[selected_label]
+
+    with st.form("guardian_resource_create"):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            family_status = st.selectbox("家族", RESOURCE_STATUS_OPTIONS)
+            medical_status = st.selectbox("医療", RESOURCE_STATUS_OPTIONS)
+            care_status = st.selectbox("介護", RESOURCE_STATUS_OPTIONS)
+        with c2:
+            housing_status = st.selectbox("住まい", RESOURCE_STATUS_OPTIONS)
+            asset_status = st.selectbox("財産", RESOURCE_STATUS_OPTIONS)
+            pet_status = st.selectbox("猫・ペット", RESOURCE_STATUS_OPTIONS)
+        with c3:
+            professional_status = st.selectbox("専門職", RESOURCE_STATUS_OPTIONS)
+            overall_status = st.selectbox("総合状態", ["安定", "おおむね安定", "要確認", "不安定", "緊急"])
+            confidentiality_level = st.selectbox("機密レベル", CONFIDENTIALITY_OPTIONS, index=1)
+        enough_memo = st.text_area("すでに使えるリソース・十分な支え")
+        shortage_memo = st.text_area("不足または将来確認したいリソース")
+        do_not_add_memo = st.text_area("今は増やさなくてよい支援・抱え込まないための注意")
+        next_check = st.text_area("次回確認")
+        memo = st.text_area("備考")
+        ok = st.form_submit_button("リソース地図を保存", disabled=not can_write())
+    if ok:
+        map_id = make_id("gmap")
+        execute("""
+            INSERT INTO guardian_resource_map
+            (map_id, ward_id, created_at, updated_at, updated_by, confidentiality_level, family_status, medical_status, care_status,
+             housing_status, asset_status, pet_status, professional_status, overall_status, shortage_memo, enough_memo, do_not_add_memo, next_check, memo)
+            VALUES
+            (%(map_id)s, %(ward_id)s, %(created_at)s, %(updated_at)s, %(updated_by)s, %(confidentiality_level)s, %(family_status)s, %(medical_status)s, %(care_status)s,
+             %(housing_status)s, %(asset_status)s, %(pet_status)s, %(professional_status)s, %(overall_status)s, %(shortage_memo)s, %(enough_memo)s, %(do_not_add_memo)s, %(next_check)s, %(memo)s)
+        """, {
+            "map_id": map_id, "ward_id": ward_id, "created_at": now_text(), "updated_at": now_text(), "updated_by": st.session_state.get("login_id", ""),
+            "confidentiality_level": confidentiality_level, "family_status": family_status, "medical_status": medical_status, "care_status": care_status,
+            "housing_status": housing_status, "asset_status": asset_status, "pet_status": pet_status, "professional_status": professional_status,
+            "overall_status": overall_status, "shortage_memo": shortage_memo, "enough_memo": enough_memo, "do_not_add_memo": do_not_add_memo,
+            "next_check": next_check, "memo": memo,
+        })
+        log_action("create", "guardian_resource_map", map_id, "リソース地図登録")
+        st.success("保存しました。")
+        st.rerun()
+
+    st.markdown("---")
+    df = fetch_df("SELECT * FROM guardian_resource_map WHERE ward_id=%(ward_id)s ORDER BY updated_at DESC NULLS LAST, created_at DESC", {"ward_id": ward_id})
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+
+def render_guardian_interviews():
+    st.subheader("面談記録")
+    ward_map, ward_labels = get_guardian_ward_options()
+    if not ward_labels:
+        st.warning("先に被後見人を登録してください。")
+        return
+    selected_label = st.selectbox("対象被後見人", ward_labels, key="guardian_interview_ward")
+    ward_id = ward_map[selected_label]
+    with st.form("guardian_interview_create"):
+        interview_date = st.date_input("日時", date.today())
+        place = st.text_input("訪問先")
+        content = st.text_area("内容")
+        ward_words = st.text_area("本人発言")
+        family_words = st.text_area("家族発言")
+        action_taken = st.text_area("対応内容")
+        next_check = st.text_area("次回確認事項")
+        memo = st.text_area("備考")
+        ok = st.form_submit_button("登録する", disabled=not can_write())
+    if ok:
+        log_id = make_id("glog")
+        execute("""
+            INSERT INTO guardian_interview_logs
+            (log_id, ward_id, created_at, updated_at, updated_by, confidentiality_level, interview_date, place, content, ward_words, family_words, action_taken, next_check, memo)
+            VALUES (%(log_id)s, %(ward_id)s, %(created_at)s, %(updated_at)s, %(updated_by)s, %(confidentiality_level)s, %(interview_date)s, %(place)s, %(content)s, %(ward_words)s, %(family_words)s, %(action_taken)s, %(next_check)s, %(memo)s)
+        """, {"log_id": log_id, "ward_id": ward_id, "created_at": now_text(), "updated_at": now_text(), "updated_by": st.session_state.get("login_id", ""), "confidentiality_level": "高", "interview_date": interview_date, "place": place, "content": content, "ward_words": ward_words, "family_words": family_words, "action_taken": action_taken, "next_check": next_check, "memo": memo})
+        log_action("create", "guardian_interview_logs", log_id, "後見面談記録")
+        st.success("登録しました。")
+        st.rerun()
+    df = fetch_df("SELECT * FROM guardian_interview_logs WHERE ward_id=%(ward_id)s ORDER BY interview_date DESC NULLS LAST, created_at DESC", {"ward_id": ward_id})
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+
+def build_guardian_ai_source(ward_id):
+    ward = fetch_one("SELECT * FROM guardian_wards WHERE ward_id=%(ward_id)s", {"ward_id": ward_id})
+    if not ward:
+        return ""
+    text = ["【被後見人】"]
+    for k, v in ward.items():
+        text.append(f"{k}:{normalize_text(v)}")
+    cards = fetch_df("SELECT * FROM guardian_cards WHERE ward_id=%(ward_id)s ORDER BY updated_at DESC NULLS LAST, created_at DESC", {"ward_id": ward_id})
+    text.append("\n【カード】")
+    if cards.empty:
+        text.append("未登録")
+    else:
+        for _, r in cards.iterrows():
+            text.append(f"- {r.get('card_type','')}｜{r.get('title','')}｜{r.get('status','')}｜{r.get('field_1','')}｜{r.get('field_2','')}｜{r.get('memo','')}")
+    maps = fetch_df("SELECT * FROM guardian_resource_map WHERE ward_id=%(ward_id)s ORDER BY updated_at DESC NULLS LAST LIMIT 3", {"ward_id": ward_id})
+    text.append("\n【リソース地図】")
+    text.append(maps.to_string(index=False) if not maps.empty else "未登録")
+    logs = fetch_df("SELECT * FROM guardian_interview_logs WHERE ward_id=%(ward_id)s ORDER BY interview_date DESC NULLS LAST, created_at DESC LIMIT 10", {"ward_id": ward_id})
+    text.append("\n【面談記録】")
+    text.append(logs.to_string(index=False) if not logs.empty else "未登録")
+    return "\n".join(text)
+
+
+def build_guardian_ai_prompt(support_type, source_text):
+    return f"""
+あなたは後見人の内部記録整理係です。
+判断を代行せず、本人の意思・生活・支援関係を整理してください。
+法的判断、医療判断、財産処分の断定、専門職への越権助言はしないでください。
+
+出力形式：
+1. 事実として確認できること
+2. 未確認・不足している情報
+3. 本人の意思・生活上大切にしたい点
+4. 現在使えるリソース
+5. 不足または将来確認したいリソース
+6. 今は増やさなくてよい支援・後見人が抱え込まないための注意
+7. 次回確認事項
+8. 家庭裁判所報告に向けた内部メモ
+
+支援種別：{support_type}
+---
+{source_text}
+""".strip()
+
+
+def render_guardian_ai_support():
+    st.subheader("後見AI支援")
+    st.caption("AIは判断係ではなく、本人を支える関係性を整理する補助係です。")
+    ward_map, ward_labels = get_guardian_ward_options()
+    if not ward_labels:
+        st.warning("先に被後見人を登録してください。")
+        return
+    selected_label = st.selectbox("対象被後見人", ward_labels, key="guardian_ai_ward")
+    ward_id = ward_map[selected_label]
+    support_type = st.selectbox("支援種別", ["リソース分析", "面談記録要約", "ヒアリング漏れ検出", "次回確認事項", "家庭裁判所報告メモ", "その他"])
+    source_text = build_guardian_ai_source(ward_id)
+    with st.expander("AIに渡す元データ", expanded=False):
+        st.text_area("元データ", source_text, height=300)
+    if st.button("後見AI整理を作成して保存", disabled=not can_write()):
+        try:
+            prompt = build_guardian_ai_prompt(support_type, source_text)
+            with st.spinner("AI整理を作成しています..."):
+                result_text, model = call_openai_summary(prompt)
+            ai_id = make_id("gai")
+            execute("""
+                INSERT INTO guardian_ai_support
+                (ai_id, ward_id, created_at, updated_by, support_type, source_text, result_text, model, memo)
+                VALUES (%(ai_id)s, %(ward_id)s, %(created_at)s, %(updated_by)s, %(support_type)s, %(source_text)s, %(result_text)s, %(model)s, %(memo)s)
+            """, {"ai_id": ai_id, "ward_id": ward_id, "created_at": now_text(), "updated_by": st.session_state.get("login_id", ""), "support_type": support_type, "source_text": source_text, "result_text": result_text, "model": model, "memo": ""})
+            log_action("create", "guardian_ai_support", ai_id, f"後見AI支援:{support_type}")
+            st.success("保存しました。")
+            st.rerun()
+        except Exception as e:
+            st.error("AI整理に失敗しました。")
+            st.exception(e)
+    df = fetch_df("SELECT ai_id, created_at, support_type, result_text, model FROM guardian_ai_support WHERE ward_id=%(ward_id)s ORDER BY created_at DESC", {"ward_id": ward_id})
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+
+def render_guardian_data_check():
+    st.subheader("後見データ確認")
+    tabs = st.tabs(["被後見人", "カード", "リソース地図", "面談記録", "AI支援"])
+    targets = [
+        ("guardian_wards", "被後見人"),
+        ("guardian_cards", "カード"),
+        ("guardian_resource_map", "リソース地図"),
+        ("guardian_interview_logs", "面談記録"),
+        ("guardian_ai_support", "AI支援"),
+    ]
+    for tab, (table, label) in zip(tabs, targets):
+        with tab:
+            df = fetch_df(f"SELECT * FROM {table} ORDER BY 1")
+            st.dataframe(df, use_container_width=True, hide_index=True)
+            st.download_button(f"{label}CSVダウンロード", df.to_csv(index=False).encode("utf-8-sig"), file_name=f"{table}.csv", mime="text/csv")
+
+
 def render_data_check():
     st.subheader("データ確認")
     tabs = st.tabs([label for _, label in TABLES])
@@ -1476,6 +2039,28 @@ elif role == VIEWER_ROLE:
 else:
     available_menus = STAFF_MENUS
 
+GUARDIAN_MENUS = [
+    "後見ダッシュボード",
+    "後見｜被後見人",
+    "後見｜本人希望カード",
+    "後見｜家族カード",
+    "後見｜医療カード",
+    "後見｜介護カード",
+    "後見｜財産カード",
+    "後見｜住まいカード",
+    "後見｜ペットカード",
+    "後見｜支援者カード",
+    "後見｜判断保留カード",
+    "後見｜家庭裁判所対応カード",
+    "後見｜リソース地図",
+    "後見｜面談記録",
+    "後見｜AI支援",
+    "後見｜データ確認",
+]
+for m in GUARDIAN_MENUS:
+    if m not in available_menus:
+        available_menus.append(m)
+
 menu = st.sidebar.radio("メニュー", available_menus)
 logout_button()
 
@@ -1535,5 +2120,37 @@ elif menu == "バックアップ・出力":
     render_backup()
 elif menu == "ログイン設定":
     render_users()
+elif menu == "後見ダッシュボード":
+    render_guardian_dashboard()
+elif menu == "後見｜被後見人":
+    render_guardian_wards()
+elif menu == "後見｜本人希望カード":
+    render_guardian_card("本人希望カード")
+elif menu == "後見｜家族カード":
+    render_guardian_card("家族カード")
+elif menu == "後見｜医療カード":
+    render_guardian_card("医療カード")
+elif menu == "後見｜介護カード":
+    render_guardian_card("介護カード")
+elif menu == "後見｜財産カード":
+    render_guardian_card("財産カード")
+elif menu == "後見｜住まいカード":
+    render_guardian_card("住まいカード")
+elif menu == "後見｜ペットカード":
+    render_guardian_card("ペットカード")
+elif menu == "後見｜支援者カード":
+    render_guardian_card("支援者カード")
+elif menu == "後見｜判断保留カード":
+    render_guardian_card("判断保留カード")
+elif menu == "後見｜家庭裁判所対応カード":
+    render_guardian_card("家庭裁判所対応カード")
+elif menu == "後見｜リソース地図":
+    render_guardian_resource_map()
+elif menu == "後見｜面談記録":
+    render_guardian_interviews()
+elif menu == "後見｜AI支援":
+    render_guardian_ai_support()
+elif menu == "後見｜データ確認":
+    render_guardian_data_check()
 elif menu == "データ確認":
     render_data_check()
