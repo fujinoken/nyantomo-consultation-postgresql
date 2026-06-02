@@ -2,6 +2,8 @@
 import uuid
 import hashlib
 import hmac
+import os
+import json
 from datetime import date, datetime
 from io import BytesIO
 import zipfile
@@ -18,6 +20,31 @@ from config import (
 from db import has_database_url, init_db, execute, fetch_df, fetch_one
 
 st.set_page_config(page_title=APP_TITLE, page_icon="🐾", layout="wide")
+
+
+# ============================================================
+# 追加機能：自動バックアップ / AI要約連携
+# ------------------------------------------------------------
+# ・自動バックアップは「アプリ起動・画面操作時」に最終実行時刻を確認し、
+#   指定時間を超えていればCSV ZIPを自動生成して backups/ に保存します。
+#   Streamlit Cloudは常時バックグラウンド実行ではないため、
+#   完全な時刻指定ジョブではなく「アクセス時自動実行」です。
+# ・AI要約は OpenAI APIキーがある場合のみ実行します。
+#   st.secrets または環境変数に OPENAI_API_KEY を設定してください。
+#
+# Secrets例：
+# OPENAI_API_KEY = "sk-..."
+# OPENAI_MODEL = "gpt-4o-mini"
+# AUTO_BACKUP_HOURS = "24"
+# AUTO_BACKUP_KEEP = "14"
+# ============================================================
+
+BACKUP_DIR = Path("backups")
+BACKUP_DIR.mkdir(exist_ok=True)
+DEFAULT_AUTO_BACKUP_HOURS = 24
+DEFAULT_BACKUP_KEEP = 14
+DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
+
 
 
 def apply_dashboard_css():
@@ -821,54 +848,523 @@ def render_line_templates():
             st.rerun()
 
 
-def render_backup():
-    st.subheader("バックアップ・出力")
-    st.caption("現在の主要テーブルをCSV ZIPで出力します。Excel出力は openpyxl が利用できる場合のみ表示します。")
 
-    data = {}
+# ============================================================
+# 自動バックアップ
+# ============================================================
+
+def get_secret_value(key, default=""):
+    """st.secrets と環境変数の両方から設定値を取得する。"""
+    try:
+        if key in st.secrets:
+            return st.secrets.get(key, default)
+    except Exception:
+        pass
+    return os.environ.get(key, default)
+
+
+def ensure_extension_tables():
+    """app.py側で追加機能用テーブルを作る。db.py未改修でも動くようにする。"""
+    execute("""
+        CREATE TABLE IF NOT EXISTS backup_logs (
+            backup_id TEXT PRIMARY KEY,
+            created_at TIMESTAMP,
+            created_by TEXT,
+            backup_type TEXT,
+            file_name TEXT,
+            table_count INTEGER,
+            note TEXT
+        )
+    """)
+    # ai_summaries はdb.py側にある想定だが、古いDBでも落ちないよう最低限作成
+    execute("""
+        CREATE TABLE IF NOT EXISTS ai_summaries (
+            summary_id TEXT PRIMARY KEY,
+            case_id TEXT REFERENCES cases(case_id) ON DELETE CASCADE,
+            client_id TEXT REFERENCES clients(client_id) ON DELETE CASCADE,
+            created_at TIMESTAMP,
+            updated_at TIMESTAMP,
+            summary_type TEXT,
+            source_text TEXT,
+            summary_text TEXT,
+            memo TEXT
+        )
+    """)
+    try:
+        execute("ALTER TABLE ai_summaries ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP")
+    except Exception:
+        pass
+    try:
+        execute("ALTER TABLE ai_summaries ADD COLUMN IF NOT EXISTS model TEXT")
+    except Exception:
+        pass
+
+
+def get_backup_tables():
+    """config.TABLESに存在する主要テーブルをバックアップ対象にする。"""
+    seen = set()
+    tables = []
     for table, label in TABLES:
+        if table not in seen:
+            tables.append((table, label))
+            seen.add(table)
+    for table, label in [("backup_logs", "バックアップログ")]:
+        if table not in seen:
+            tables.append((table, label))
+    return tables
+
+
+def build_csv_zip_bytes():
+    """全テーブルをCSV ZIP化してbytesで返す。"""
+    data = {}
+    for table, label in get_backup_tables():
         try:
             data[label] = fetch_df(f"SELECT * FROM {table} ORDER BY 1")
         except Exception as e:
             data[label] = pd.DataFrame([{"error": str(e)}])
 
-    # CSV ZIPバックアップ：openpyxl不要で必ず動く
-    csv_zip_buffer = BytesIO()
-    with zipfile.ZipFile(csv_zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        meta = {
+            "app": APP_TITLE,
+            "created_at": now_text(),
+            "backup_type": "csv_zip",
+            "tables": [label for _, label in get_backup_tables()],
+        }
+        zf.writestr("backup_meta.json", json.dumps(meta, ensure_ascii=False, indent=2))
         for label, df in data.items():
-            zf.writestr(f"{label}.csv", df.to_csv(index=False).encode("utf-8-sig"))
+            safe_name = str(label).replace("/", "_").replace("\\", "_")
+            zf.writestr(f"{safe_name}.csv", df.to_csv(index=False).encode("utf-8-sig"))
+    buffer.seek(0)
+    return buffer.getvalue(), len(data)
 
-    st.download_button(
-        "全テーブルCSV ZIPダウンロード",
-        csv_zip_buffer.getvalue(),
-        file_name=f"nyantomo_backup_{today_text()}.zip",
-        mime="application/zip"
+
+def save_backup_file(backup_type="manual", note=""):
+    """CSV ZIPバックアップをbackupsフォルダへ保存し、ログを残す。"""
+    zip_bytes, table_count = build_csv_zip_bytes()
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    file_name = f"nyantomo_backup_{backup_type}_{stamp}.zip"
+    path = BACKUP_DIR / file_name
+    path.write_bytes(zip_bytes)
+    backup_id = make_id("backup")
+    execute("""
+        INSERT INTO backup_logs
+        (backup_id, created_at, created_by, backup_type, file_name, table_count, note)
+        VALUES (%(backup_id)s, %(created_at)s, %(created_by)s, %(backup_type)s, %(file_name)s, %(table_count)s, %(note)s)
+    """, {
+        "backup_id": backup_id,
+        "created_at": now_text(),
+        "created_by": st.session_state.get("login_id", "system"),
+        "backup_type": backup_type,
+        "file_name": file_name,
+        "table_count": table_count,
+        "note": note,
+    })
+    log_action("backup", "backup_logs", backup_id, f"{backup_type}: {file_name}")
+    return path
+
+
+def cleanup_old_backups(keep=None):
+    """古いバックアップファイルを指定件数だけ残して削除する。"""
+    try:
+        keep = int(keep or get_secret_value("AUTO_BACKUP_KEEP", DEFAULT_BACKUP_KEEP))
+    except Exception:
+        keep = DEFAULT_BACKUP_KEEP
+    files = sorted(BACKUP_DIR.glob("nyantomo_backup_*.zip"), key=lambda p: p.stat().st_mtime, reverse=True)
+    removed = 0
+    for p in files[keep:]:
+        try:
+            p.unlink()
+            removed += 1
+        except Exception:
+            pass
+    return removed
+
+
+def maybe_run_auto_backup():
+    """最終自動バックアップから指定時間以上経っていれば自動作成する。"""
+    try:
+        hours = int(get_secret_value("AUTO_BACKUP_HOURS", DEFAULT_AUTO_BACKUP_HOURS))
+    except Exception:
+        hours = DEFAULT_AUTO_BACKUP_HOURS
+    if hours <= 0:
+        return None
+
+    row = fetch_one("""
+        SELECT created_at
+        FROM backup_logs
+        WHERE backup_type = 'auto'
+        ORDER BY created_at DESC
+        LIMIT 1
+    """)
+    should_run = False
+    if not row or not row.get("created_at"):
+        should_run = True
+    else:
+        try:
+            last = pd.to_datetime(row["created_at"]).to_pydatetime()
+            elapsed_hours = (datetime.now() - last).total_seconds() / 3600
+            should_run = elapsed_hours >= hours
+        except Exception:
+            should_run = True
+
+    if should_run:
+        path = save_backup_file("auto", f"AUTO_BACKUP_HOURS={hours}")
+        cleanup_old_backups()
+        return path
+    return None
+
+
+# ============================================================
+# AI要約連携
+# ============================================================
+
+def get_openai_api_key():
+    try:
+        if "openai" in st.secrets and "api_key" in st.secrets["openai"]:
+            return st.secrets["openai"]["api_key"]
+    except Exception:
+        pass
+    return get_secret_value("OPENAI_API_KEY", "")
+
+
+def get_openai_model():
+    return get_secret_value("OPENAI_MODEL", DEFAULT_OPENAI_MODEL) or DEFAULT_OPENAI_MODEL
+
+
+def build_case_ai_source(case_id):
+    """AI要約用に、案件・履歴・関連カードを1つの安全なテキストにまとめる。"""
+    case = fetch_one("""
+        SELECT c.*, cl.name AS client_name, cl.age_group, cl.area, cl.contact_method, cl.position, cl.note AS client_note
+        FROM cases c
+        JOIN clients cl ON c.client_id = cl.client_id
+        WHERE c.case_id = %(case_id)s
+    """, {"case_id": case_id})
+    if not case:
+        return ""
+
+    def df_to_lines(title, df, cols):
+        lines = [f"\n■ {title}"]
+        if df.empty:
+            lines.append("未登録")
+            return "\n".join(lines)
+        for _, r in df.iterrows():
+            parts = []
+            for col in cols:
+                if col in r and normalize_text(r[col]):
+                    parts.append(f"{col}:{normalize_text(r[col])}")
+            lines.append("- " + "／".join(parts))
+        return "\n".join(lines)
+
+    source = f"""【相談者】
+氏名:{case.get('client_name','')}
+地域:{case.get('area','')}
+年代:{case.get('age_group','')}
+連絡方法:{case.get('contact_method','')}
+立場:{case.get('position','')}
+相談者備考:{case.get('client_note','')}
+
+【案件】
+案件名:{case.get('case_title','')}
+案件種別:{case.get('case_type','')}
+状態:{case.get('status','')}
+相談日:{case.get('consult_date','')}
+現在の状態:{case.get('current_state','')}
+住まい・空き家の状態:{case.get('house_state','')}
+猫との関係:{case.get('cat_relation','')}
+家族間の温度差:{case.get('family_gap','')}
+急がされ感:{case.get('pressure','')}
+心配ごと:{case.get('worries','')}
+今は決めないこと:{case.get('not_decide','')}
+初回確認事項:{case.get('first_check','')}
+外部向けメモ:{case.get('free_memo','')}
+内部メモ:{case.get('internal_memo','')}
+次回確認:{case.get('next_check','')}
+次回ヒアリング項目:{case.get('next_hearing_items','')}
+ヒアリング漏れ警告:{case.get('hearing_missing','')}
+今やらない方がいいこと:{case.get('do_not_do_now','')}
+次回確認日:{case.get('next_check_date','')}
+終了・最終メモ:{case.get('final_memo','')}
+"""
+
+    history = fetch_df("""
+        SELECT record_date, record_type, before_status, after_status, record, next_action, internal_memo
+        FROM history WHERE case_id=%(case_id)s
+        ORDER BY record_date DESC NULLS LAST, created_at DESC LIMIT 20
+    """, {"case_id": case_id})
+    source += df_to_lines("相談履歴", history, ["record_date", "record_type", "before_status", "after_status", "record", "next_action", "internal_memo"])
+
+    related_specs = [
+        ("properties", "空き家カード", ["property_name", "address", "property_status", "vacant_status", "key_hold", "neighborhood", "visit_frequency", "memo"]),
+        ("cats", "猫情報カード", ["cat_name", "age", "sex", "health_memo", "life_status", "future_plan", "memo"]),
+        ("family", "家族関係メモ", ["name", "relation", "contact_ok", "temperature", "memo"]),
+        ("line_messages", "LINEメモ", ["to_target", "message_text", "send_status", "response_memo"]),
+    ]
+    for table, title, cols in related_specs:
+        try:
+            df = fetch_df(f"SELECT * FROM {table} WHERE case_id=%(case_id)s ORDER BY created_at DESC LIMIT 20", {"case_id": case_id})
+            source += df_to_lines(title, df, cols)
+        except Exception as e:
+            source += f"\n■ {title}\n取得エラー:{e}"
+
+    return source.strip()
+
+
+def build_ai_prompt(summary_type, source_text):
+    return f"""
+あなたは『にゃんとも 住まいと猫の相談室』の内部記録整理係です。
+役割は、相談記録を整理することだけです。
+法律判断、医療判断、不動産判断、税務判断、断定的助言はしないでください。
+相談者を急がせず、事実・未確定・保留・次回確認を分けてください。
+
+出力形式：
+1. 事実として確認できること
+2. まだ未確定なこと
+3. 相談者が今は決めなくてよいこと
+4. 急がせないための注意点
+5. 次回確認するとよいこと
+6. 内部メモ用の短い要約
+
+要約種別：{summary_type}
+
+以下の記録を整理してください。
+---
+{source_text}
+""".strip()
+
+
+def call_openai_summary(prompt):
+    api_key = get_openai_api_key()
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY が設定されていません。")
+    model = get_openai_model()
+    try:
+        from openai import OpenAI
+    except Exception as e:
+        raise RuntimeError("openai パッケージがありません。requirements.txt に openai を追加してください。") from e
+
+    client = OpenAI(api_key=api_key)
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": "あなたは相談記録を安全に整理する日本語の業務補助AIです。"},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.2,
     )
+    return response.choices[0].message.content.strip(), model
+
+
+def save_ai_summary(case_id, client_id, summary_type, source_text, summary_text, memo="", model=""):
+    summary_id = make_id("summary")
+    # model列がないDBでも保存できるよう2段階にする
+    try:
+        execute("""
+            INSERT INTO ai_summaries
+            (summary_id, case_id, client_id, created_at, updated_at, summary_type, source_text, summary_text, memo, model)
+            VALUES (%(summary_id)s, %(case_id)s, %(client_id)s, %(created_at)s, %(updated_at)s, %(summary_type)s, %(source_text)s, %(summary_text)s, %(memo)s, %(model)s)
+        """, {
+            "summary_id": summary_id,
+            "case_id": case_id,
+            "client_id": client_id,
+            "created_at": now_text(),
+            "updated_at": now_text(),
+            "summary_type": summary_type,
+            "source_text": source_text,
+            "summary_text": summary_text,
+            "memo": memo,
+            "model": model,
+        })
+    except Exception:
+        execute("""
+            INSERT INTO ai_summaries
+            (summary_id, case_id, client_id, created_at, updated_at, summary_type, source_text, summary_text, memo)
+            VALUES (%(summary_id)s, %(case_id)s, %(client_id)s, %(created_at)s, %(updated_at)s, %(summary_type)s, %(source_text)s, %(summary_text)s, %(memo)s)
+        """, {
+            "summary_id": summary_id,
+            "case_id": case_id,
+            "client_id": client_id,
+            "created_at": now_text(),
+            "updated_at": now_text(),
+            "summary_type": summary_type,
+            "source_text": source_text,
+            "summary_text": summary_text,
+            "memo": memo,
+        })
+    log_action("create", "ai_summaries", summary_id, f"AI要約作成：{summary_type}")
+    return summary_id
+
+
+def render_ai_summary():
+    st.subheader("AI要約メモ")
+    st.caption("AIは判断係ではなく、記録の整理係として使います。事実・未確定・保留・次回確認を分けて保存します。")
+
+    case_map, case_labels = get_case_options()
+    if not case_labels:
+        st.warning("先に案件を登録してください。")
+        return
+
+    selected_label = st.selectbox("対象案件", case_labels, key="ai_case_select")
+    case_id = case_map[selected_label]
+    client_id = case_to_client(case_id)
+
+    source_text = build_case_ai_source(case_id)
+
+    with st.expander("AIに渡す元データを確認", expanded=False):
+        st.text_area("元データ", source_text, height=300)
+
+    summary_type = st.selectbox("要約種別", ["初回相談整理", "次回確認メモ", "家族共有前の整理", "内部メモ整理", "終了時整理", "その他"])
+    extra_instruction = st.text_area("追加指示（任意）", placeholder="例：相談者に見せる前提ではなく、内部用に短めに整理")
+
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        run_ai = st.button("AI要約を作成して保存", disabled=not can_write())
+    with col2:
+        st.caption(f"使用モデル：{get_openai_model()} / APIキー：{'設定あり' if get_openai_api_key() else '未設定'}")
+
+    if run_ai:
+        if not source_text.strip():
+            st.error("要約対象のデータがありません。")
+        else:
+            prompt = build_ai_prompt(summary_type, source_text)
+            if extra_instruction.strip():
+                prompt += f"\n\n追加指示：{extra_instruction.strip()}"
+            try:
+                with st.spinner("AI要約を作成しています..."):
+                    summary_text, model = call_openai_summary(prompt)
+                    save_ai_summary(case_id, client_id, summary_type, source_text, summary_text, extra_instruction, model)
+                st.success("AI要約を保存しました。")
+                st.rerun()
+            except Exception as e:
+                st.error("AI要約の作成に失敗しました。")
+                st.exception(e)
+
+    st.markdown("---")
+    st.markdown("### 保存済みAI要約")
+    df = fetch_df("""
+        SELECT summary_id, created_at, summary_type, summary_text, memo
+        FROM ai_summaries
+        WHERE case_id=%(case_id)s
+        ORDER BY created_at DESC
+    """, {"case_id": case_id})
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+    if not df.empty and can_write():
+        selected = st.selectbox("削除するAI要約ID", df["summary_id"].tolist())
+        delete_confirm = st.checkbox("このAI要約を削除することを確認しました。")
+        if st.button("選択したAI要約を削除"):
+            if not delete_confirm:
+                st.error("削除するには確認チェックを入れてください。")
+            else:
+                execute("DELETE FROM ai_summaries WHERE summary_id=%(id)s", {"id": selected})
+                log_action("delete", "ai_summaries", selected, "AI要約削除")
+                st.success("削除しました。")
+                st.rerun()
+
+def render_backup():
+    st.subheader("バックアップ・出力")
+    st.caption("CSV ZIPの手動出力に加え、アプリ起動・画面操作時の自動バックアップを行います。")
+
+    st.markdown("### 自動バックアップ設定")
+    try:
+        hours = int(get_secret_value("AUTO_BACKUP_HOURS", DEFAULT_AUTO_BACKUP_HOURS))
+    except Exception:
+        hours = DEFAULT_AUTO_BACKUP_HOURS
+    try:
+        keep = int(get_secret_value("AUTO_BACKUP_KEEP", DEFAULT_BACKUP_KEEP))
+    except Exception:
+        keep = DEFAULT_BACKUP_KEEP
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("自動バックアップ間隔", f"{hours}時間")
+    c2.metric("保存件数", f"{keep}件")
+    c3.metric("保存先", str(BACKUP_DIR))
+
+    st.info("Streamlit Cloudでは常時バックグラウンド処理ではなく、アプリが開かれた時・操作された時に前回時刻を確認して自動作成します。")
+
+    st.markdown("---")
+    st.markdown("### 手動バックアップ")
+
+    col1, col2 = st.columns([1, 2])
+    with col1:
+        if st.button("今すぐバックアップを保存", disabled=not can_write()):
+            try:
+                path = save_backup_file("manual", "画面から手動作成")
+                cleanup_old_backups(keep)
+                st.success(f"バックアップを保存しました：{path.name}")
+                st.rerun()
+            except Exception as e:
+                st.error("バックアップ作成に失敗しました。")
+                st.exception(e)
+
+    with col2:
+        try:
+            zip_bytes, _ = build_csv_zip_bytes()
+            st.download_button(
+                "全テーブルCSV ZIPを直接ダウンロード",
+                zip_bytes,
+                file_name=f"nyantomo_backup_direct_{today_text()}.zip",
+                mime="application/zip"
+            )
+        except Exception as e:
+            st.error("CSV ZIP作成に失敗しました。")
+            st.exception(e)
+
+    st.markdown("---")
+    st.markdown("### 保存済みバックアップ")
+    files = sorted(BACKUP_DIR.glob("nyantomo_backup_*.zip"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not files:
+        st.info("保存済みバックアップはまだありません。")
+    else:
+        rows = []
+        for p in files:
+            rows.append({
+                "ファイル名": p.name,
+                "サイズKB": round(p.stat().st_size / 1024, 1),
+                "更新日時": datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+            })
+        file_df = pd.DataFrame(rows)
+        st.dataframe(file_df, use_container_width=True, hide_index=True)
+        selected_file = st.selectbox("ダウンロードするバックアップ", [p.name for p in files])
+        selected_path = BACKUP_DIR / selected_file
+        if selected_path.exists():
+            st.download_button(
+                "選択したバックアップをダウンロード",
+                selected_path.read_bytes(),
+                file_name=selected_path.name,
+                mime="application/zip"
+            )
+
+    st.markdown("---")
+    st.markdown("### バックアップログ")
+    try:
+        logs = fetch_df("SELECT * FROM backup_logs ORDER BY created_at DESC LIMIT 100")
+        st.dataframe(logs, use_container_width=True, hide_index=True)
+    except Exception as e:
+        st.warning(f"バックアップログを表示できません：{e}")
 
     st.markdown("---")
     st.markdown("### Excel出力")
-
     try:
         import openpyxl  # noqa: F401
-
+        data = {}
+        for table, label in get_backup_tables():
+            try:
+                data[label] = fetch_df(f"SELECT * FROM {table} ORDER BY 1")
+            except Exception as e:
+                data[label] = pd.DataFrame([{"error": str(e)}])
         excel_buffer = BytesIO()
         with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
             for label, df in data.items():
-                sheet_name = label[:31]
-                df.to_excel(writer, index=False, sheet_name=sheet_name)
-
+                df.to_excel(writer, index=False, sheet_name=str(label)[:31])
         st.download_button(
             "全テーブルExcelダウンロード",
             excel_buffer.getvalue(),
             file_name=f"nyantomo_backup_{today_text()}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
-
     except ModuleNotFoundError:
-        st.warning(
-            "Streamlit Cloud側に openpyxl が入っていないため、Excel出力は現在使えません。"
-            " CSV ZIPバックアップは利用できます。Excel出力を使う場合は requirements.txt に openpyxl を追加してください。"
-        )
+        st.warning("openpyxl が入っていないため、Excel出力は使えません。CSV ZIPバックアップは利用できます。")
     except Exception as e:
         st.error("Excel出力でエラーが発生しました。CSV ZIPバックアップをご利用ください。")
         st.exception(e)
@@ -952,6 +1448,7 @@ if not has_database_url():
 
 try:
     init_db(hash_password, make_id, now_text)
+    ensure_extension_tables()
 except Exception as e:
     st.title(APP_TITLE)
     st.error("PostgreSQLへの接続または初期化に失敗しました。")
@@ -959,6 +1456,14 @@ except Exception as e:
     st.stop()
 
 require_login()
+
+try:
+    auto_backup_path = maybe_run_auto_backup()
+    if auto_backup_path and can_admin():
+        st.toast(f"自動バックアップを作成しました：{auto_backup_path.name}")
+except Exception as e:
+    if can_admin():
+        st.warning(f"自動バックアップに失敗しました：{e}")
 
 st.title(APP_TITLE)
 st.caption(APP_CAPTION)
@@ -1012,12 +1517,7 @@ elif menu == "家族関係メモ":
         ("memo", "メモ", "area"),
     ])
 elif menu == "AI要約メモ":
-    related_card_page("ai_summaries", "summary_id", "AI要約メモ", [
-        ("summary_type", "要約種別", "text"),
-        ("source_text", "元メモ", "area"),
-        ("summary_text", "要約", "area"),
-        ("memo", "備考", "area"),
-    ])
+    render_ai_summary()
 elif menu == "LINEメモ":
     render_line_memos()
 elif menu == "LINEテンプレート":
