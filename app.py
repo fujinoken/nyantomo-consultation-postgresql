@@ -866,7 +866,7 @@ def get_secret_value(key, default=""):
 def ensure_extension_tables():
     """app.py側で追加機能用テーブルを作る。db.py未改修でも動くようにする。"""
     execute("""
-        CREATE TABLE IF NOT EXISTS backup_logs (
+        CREATE TABLE IF NOT EXISTS nyantomo_backup_logs (
             backup_id TEXT PRIMARY KEY,
             created_at TIMESTAMP,
             created_by TEXT,
@@ -908,7 +908,7 @@ def get_backup_tables():
         if table not in seen:
             tables.append((table, label))
             seen.add(table)
-    for table, label in [("backup_logs", "バックアップログ")]:
+    for table, label in [("nyantomo_backup_logs", "自動バックアップログ")]:
         if table not in seen:
             tables.append((table, label))
     return tables
@@ -948,7 +948,7 @@ def save_backup_file(backup_type="manual", note=""):
     path.write_bytes(zip_bytes)
     backup_id = make_id("backup")
     execute("""
-        INSERT INTO backup_logs
+        INSERT INTO nyantomo_backup_logs
         (backup_id, created_at, created_by, backup_type, file_name, table_count, note)
         VALUES (%(backup_id)s, %(created_at)s, %(created_by)s, %(backup_type)s, %(file_name)s, %(table_count)s, %(note)s)
     """, {
@@ -960,7 +960,7 @@ def save_backup_file(backup_type="manual", note=""):
         "table_count": table_count,
         "note": note,
     })
-    log_action("backup", "backup_logs", backup_id, f"{backup_type}: {file_name}")
+    log_action("backup", "nyantomo_backup_logs", backup_id, f"{backup_type}: {file_name}")
     return path
 
 
@@ -992,7 +992,7 @@ def maybe_run_auto_backup():
 
     row = fetch_one("""
         SELECT created_at
-        FROM backup_logs
+        FROM nyantomo_backup_logs
         WHERE backup_type = 'auto'
         ORDER BY created_at DESC
         LIMIT 1
@@ -1336,12 +1336,12 @@ def render_backup():
             )
 
     st.markdown("---")
-    st.markdown("### バックアップログ")
+    st.markdown("### 自動バックアップログ")
     try:
-        logs = fetch_df("SELECT * FROM backup_logs ORDER BY created_at DESC LIMIT 100")
+        logs = fetch_df("SELECT * FROM nyantomo_backup_logs ORDER BY created_at DESC LIMIT 100")
         st.dataframe(logs, use_container_width=True, hide_index=True)
     except Exception as e:
-        st.warning(f"バックアップログを表示できません：{e}")
+        st.warning(f"自動バックアップログを表示できません：{e}")
 
     st.markdown("---")
     st.markdown("### Excel出力")
