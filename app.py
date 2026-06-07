@@ -1510,9 +1510,169 @@ def save_ai_summary(case_id, client_id, summary_type, source_text, summary_text,
             "summary_text": summary_text,
             "memo": memo,
         })
+
     log_action("create", "ai_summaries", summary_id, f"AI要約作成：{summary_type}")
     return summary_id
 
+
+# ============================================================
+# 相談者向けA4レポートPDF出力
+# ============================================================
+
+def _strip_markdown_for_report(text):
+    """PDF出力用にMarkdown記号を控えめに除去する。"""
+    value = normalize_text(text)
+    for mark in ["**", "__", "###", "##", "#", "`"]:
+        value = value.replace(mark, "")
+    value = value.replace("・", "- ")
+    return value.strip()
+
+
+def _extract_markdown_section(text, start_keywords, stop_pattern=r"\n\s*#{1,3}\s*\d+\."):
+    """AI整理結果から指定見出しの本文を取り出す。"""
+    import re
+    raw = normalize_text(text)
+    for kw in start_keywords:
+        m = re.search(rf"(?ms)^\s*#{{0,3}}\s*\d+\.\s*{re.escape(kw)}\s*\n(.*?)(?={stop_pattern}|\Z)", raw)
+        if m:
+            return _strip_markdown_for_report(m.group(1))
+    return ""
+
+
+def _shorten_report_lines(text, max_lines=6, max_chars=260):
+    """A4一枚に収めるため、長すぎる本文を要点行に圧縮する。"""
+    cleaned = _strip_markdown_for_report(text)
+    if not cleaned:
+        return "- 未整理"
+    lines = []
+    for line in cleaned.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith(("-", "・", "○", "●", "*")):
+            line = line.lstrip("-・○●* ")
+        if line:
+            lines.append("- " + line)
+    if not lines:
+        lines = ["- " + cleaned.replace("\n", " ")]
+    joined = "\n".join(lines[:max_lines])
+    if len(joined) > max_chars:
+        joined = joined[:max_chars].rstrip() + "…"
+    return joined
+
+
+def build_client_report_pdf_bytes(case_id, summary_row):
+    """カード整理AIの結果から、相談者向けA4一枚PDFを生成する。"""
+    try:
+        from reportlab.pdfgen import canvas
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.units import mm
+        from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+        from reportlab.pdfbase import pdfmetrics
+    except Exception as e:
+        raise RuntimeError("PDF出力には reportlab が必要です。requirements.txt に reportlab を追加してください。") from e
+
+    pdfmetrics.registerFont(UnicodeCIDFont("HeiseiMin-W3"))
+    pdfmetrics.registerFont(UnicodeCIDFont("HeiseiKakuGo-W5"))
+
+    case = fetch_one("""
+        SELECT c.case_title, c.consult_date, c.status, cl.name AS client_name, cl.area
+        FROM cases c JOIN clients cl ON c.client_id = cl.client_id
+        WHERE c.case_id=%(case_id)s
+    """, {"case_id": case_id}) or {}
+
+    summary_text = normalize_text(summary_row.get("summary_text", ""))
+    theme = _extract_markdown_section(summary_text, ["今回見えているテーマ", "今回見えていること"])
+    not_decide = _extract_markdown_section(summary_text, ["今すぐ決めなくてよいこと", "今決めなくてよいこと"])
+    organize = _extract_markdown_section(summary_text, ["少し整理した方がよいこと"])
+    next_check = _extract_markdown_section(summary_text, ["次回確認"])
+
+    if not theme:
+        theme = summary_text[:220]
+    homework = ""
+    if organize:
+        homework += organize
+    if next_check:
+        homework += ("\n" if homework else "") + next_check
+    if not homework:
+        homework = "- 次回の相談で一緒に確認します。"
+
+    title = "にゃんとも相談整理レポート"
+    subtitle = "急いで結論を出すためではなく、いま見えていることを一緒に眺めるためのメモです。"
+
+    buffer = BytesIO()
+    c = canvas.Canvas(buffer, pagesize=A4)
+    width, height = A4
+    margin_x = 18 * mm
+    y = height - 18 * mm
+
+    def wrap_text(value, font_name="HeiseiMin-W3", font_size=10, max_width=165*mm):
+        text_value = normalize_text(value)
+        result = []
+        for paragraph in text_value.splitlines():
+            paragraph = paragraph.strip()
+            if not paragraph:
+                result.append("")
+                continue
+            current = ""
+            for ch in paragraph:
+                test = current + ch
+                if c.stringWidth(test, font_name, font_size) <= max_width:
+                    current = test
+                else:
+                    if current:
+                        result.append(current)
+                    current = ch
+            if current:
+                result.append(current)
+        return result
+
+    def draw_text_block(heading, body, max_lines=7):
+        nonlocal y
+        c.setFont("HeiseiKakuGo-W5", 12)
+        c.drawString(margin_x, y, heading)
+        y -= 7 * mm
+        c.setFont("HeiseiMin-W3", 10)
+        lines = wrap_text(_shorten_report_lines(body, max_lines=max_lines), "HeiseiMin-W3", 10, width - margin_x*2)
+        for line in lines[:max_lines]:
+            c.drawString(margin_x + 4*mm, y, line)
+            y -= 5.3 * mm
+        y -= 3 * mm
+
+    # header
+    c.setFont("HeiseiKakuGo-W5", 18)
+    c.drawString(margin_x, y, title)
+    y -= 8 * mm
+    c.setFont("HeiseiMin-W3", 9)
+    c.drawString(margin_x, y, subtitle)
+    y -= 8 * mm
+
+    # meta box
+    c.setLineWidth(0.5)
+    c.roundRect(margin_x, y-20*mm, width - margin_x*2, 18*mm, 4*mm, stroke=1, fill=0)
+    c.setFont("HeiseiMin-W3", 9)
+    c.drawString(margin_x + 4*mm, y - 6*mm, f"相談者：{normalize_text(case.get('client_name', '')) or '未設定'}")
+    c.drawString(margin_x + 4*mm, y - 12*mm, f"案件：{normalize_text(case.get('case_title', '')) or '未設定'}")
+    c.drawString(width/2, y - 6*mm, f"作成日：{today_text()}")
+    c.drawString(width/2, y - 12*mm, f"整理種別：{normalize_text(summary_row.get('summary_type', 'カード整理AI'))}")
+    y -= 28 * mm
+
+    draw_text_block("1. 今回見えていること", theme, max_lines=7)
+    draw_text_block("2. 今決めなくてよいこと", not_decide or "- まだ無理に結論を出さなくてよいことを、次回一緒に確認します。", max_lines=6)
+    draw_text_block("3. 次回までの宿題・確認すること", homework, max_lines=8)
+
+    # footer note
+    y = max(y, 28*mm)
+    c.setFont("HeiseiMin-W3", 8)
+    footer = "※このレポートは相談内容の整理メモです。法律・税務・医療・不動産の判断を断定するものではありません。"
+    for line in wrap_text(footer, "HeiseiMin-W3", 8, width - margin_x*2):
+        c.drawString(margin_x, y, line)
+        y -= 4*mm
+    c.drawString(margin_x, 14*mm, "にゃんとも 住まいと猫の相談室")
+    c.showPage()
+    c.save()
+    buffer.seek(0)
+    return buffer.getvalue()
 
 
 # ============================================================
@@ -2286,6 +2446,21 @@ def render_ai_summary():
                 st.markdown(row.get("summary_text", ""))
                 if normalize_text(row.get("memo", "")):
                     st.caption(f"追加指示：{row.get('memo', '')}")
+
+                st.markdown("#### 相談者向けA4レポート")
+                try:
+                    pdf_bytes = build_client_report_pdf_bytes(case_id, row)
+                    safe_client = normalize_text(selected_label).split("｜")[0] if selected_label else "client"
+                    safe_name = "nyantomo_report_" + safe_client.replace("/", "_").replace("\\", "_") + "_" + normalize_text(row.get("summary_id", "summary")) + ".pdf"
+                    st.download_button(
+                        "A4一枚PDFをダウンロード",
+                        data=pdf_bytes,
+                        file_name=safe_name,
+                        mime="application/pdf",
+                        key=f"client_report_pdf_{row.get('summary_id', '')}",
+                    )
+                except Exception as e:
+                    st.warning(f"PDFを作成できませんでした：{e}")
 
         st.markdown("#### 一覧")
         st.dataframe(df, use_container_width=True, hide_index=True)
