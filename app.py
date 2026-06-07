@@ -1588,7 +1588,7 @@ def _build_report_one_liner(theme, organize, next_check, not_decide, pending):
 
 
 def build_client_report_pdf_bytes(case_id, summary_row):
-    """カード整理AIの結果から、相談者向けA4一枚PDFを生成する。Ver2.6/2.7対応。"""
+    """カード整理AIの結果から、相談者向けA4一枚PDFを生成する。Ver2.8対応：上段ひとこと・中段4枠・下段注意書き。"""
     try:
         from reportlab.pdfgen import canvas
         from reportlab.lib.pagesizes import A4
@@ -1708,7 +1708,7 @@ def build_client_report_pdf_bytes(case_id, summary_row):
         col_gap = 5 * mm
         row_gap = 5 * mm
         box_w = (width - margin_x*2 - col_gap) / 2
-        box_h = 30 * mm
+        box_h = 43 * mm
         left_x = margin_x
         right_x = margin_x + box_w + col_gap
 
@@ -1723,16 +1723,16 @@ def build_client_report_pdf_bytes(case_id, summary_row):
             c.roundRect(x, top_y - box_h, box_w, box_h, 3*mm, stroke=1, fill=0)
             c.setFont("HeiseiKakuGo-W5", 9.2)
             c.drawString(x + 3*mm, top_y - 5.2*mm, heading)
-            compact = _shorten_report_lines(body, max_lines=3, max_chars=130)
+            compact = _shorten_report_lines(body, max_lines=5, max_chars=190)
             draw_wrapped(
                 x + 3*mm,
                 top_y - 11*mm,
                 compact,
                 "HeiseiMin-W3",
-                7.7,
+                8.0,
                 box_w - 6*mm,
-                max_lines=4,
-                line_gap=3.7*mm,
+                max_lines=6,
+                line_gap=3.9*mm,
             )
         y -= (box_h * 2 + row_gap + 7*mm)
 
@@ -1756,19 +1756,23 @@ def build_client_report_pdf_bytes(case_id, summary_row):
 
     draw_one_liner_box()
 
-    draw_text_block("1. 今回見えていること", theme, max_lines=4)
-    draw_text_block("2. 今決めなくてよいこと", not_decide or "- まだ無理に結論を出さなくてよいことを、次回一緒に確認します。", max_lines=4)
-    draw_text_block("3. 次回までの宿題・確認すること", homework, max_lines=5)
-
+    # Ver2.8：重複を避けるため、本文の1〜3表示は行わず、4つの整理枠だけを主役にする
     draw_four_frame_checklist()
 
     # footer note
-    y = max(y, 24*mm)
-    c.setFont("HeiseiMin-W3", 7.6)
-    footer = "※このレポートは相談内容の整理メモです。法律・税務・医療・不動産の判断を断定するものではありません。"
-    for line in wrap_text(footer, "HeiseiMin-W3", 7.6, width - margin_x*2):
-        c.drawString(margin_x, y, line)
-        y -= 3.7*mm
+    y = max(y, 28*mm)
+    c.setLineWidth(0.4)
+    note_h = 17 * mm
+    c.roundRect(margin_x, y-note_h, width - margin_x*2, note_h, 3*mm, stroke=1, fill=0)
+    c.setFont("HeiseiMin-W3", 7.8)
+    footer_lines = [
+        "※このレポートは、相談内容を整理するためのメモです。",
+        "法律・税務・医療・不動産の判断を示すものではありません。",
+    ]
+    fy = y - 6*mm
+    for line in footer_lines:
+        c.drawString(margin_x + 4*mm, fy, line)
+        fy -= 4.2*mm
     c.drawString(margin_x, 13*mm, "にゃんとも 住まいと猫の相談室")
     c.showPage()
     c.save()
