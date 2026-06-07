@@ -46,6 +46,51 @@ DEFAULT_BACKUP_KEEP = 14
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 
 
+# ============================================================
+# にゃんとも相談管理 Ver2.0：カード整理OS 設定
+# ============================================================
+
+NYANTOMO_CARD_TYPES = [
+    "猫カード",
+    "住まいカード",
+    "家族カード",
+    "健康カード",
+    "お金カード",
+    "制度カード",
+    "支援者カード",
+    "その他カード",
+]
+
+NYANTOMO_CARD_STATUS_OPTIONS = ["気になる", "検討中", "保留", "整理済"]
+
+PENDING_STATUS_OPTIONS = [
+    "保留中",
+    "次回確認",
+    "家族確認待ち",
+    "専門家確認待ち",
+    "整理済",
+    "終了",
+]
+
+PENDING_DEADLINE_OPTIONS = ["期限なし", "目安あり", "期限あり", "要確認"]
+
+SUPPORT_CATEGORY_OPTIONS = [
+    "包括",
+    "ケアマネ",
+    "主治医",
+    "宅建士",
+    "司法書士",
+    "弁護士",
+    "税理士",
+    "動物病院",
+    "行政",
+    "親族",
+    "近隣",
+    "その他",
+]
+
+
+
 
 def apply_dashboard_css():
     st.markdown("""
@@ -704,6 +749,7 @@ def render_cases():
 
 def related_card_page(table_name, id_col, title, fields):
     st.subheader(title)
+    card_type = title
     case_map, case_labels = get_case_options()
     if not case_labels:
         st.warning("先に案件を登録してください。")
@@ -906,6 +952,49 @@ def ensure_extension_tables():
         pass
 
 
+    # ========================================================
+    # にゃんとも相談管理 Ver2.0：カード整理OS 追加テーブル
+    # ========================================================
+    execute("""
+        CREATE TABLE IF NOT EXISTS consultation_cards (
+            card_id TEXT PRIMARY KEY,
+            case_id TEXT REFERENCES cases(case_id) ON DELETE CASCADE,
+            client_id TEXT REFERENCES clients(client_id) ON DELETE CASCADE,
+            created_at TIMESTAMP,
+            updated_at TIMESTAMP,
+            updated_by TEXT,
+            card_type TEXT,
+            card_status TEXT,
+            concern TEXT,
+            client_words TEXT,
+            current_state TEXT,
+            unknown_items TEXT,
+            related_people_places TEXT,
+            next_check_items TEXT,
+            memo TEXT
+        )
+    """)
+    execute("""
+        CREATE TABLE IF NOT EXISTS pending_items (
+            pending_id TEXT PRIMARY KEY,
+            case_id TEXT REFERENCES cases(case_id) ON DELETE CASCADE,
+            client_id TEXT REFERENCES clients(client_id) ON DELETE CASCADE,
+            created_at TIMESTAMP,
+            updated_at TIMESTAMP,
+            updated_by TEXT,
+            theme TEXT,
+            reason TEXT,
+            deadline_type TEXT,
+            next_check_date DATE,
+            related_people TEXT,
+            caution TEXT,
+            status TEXT,
+            memo TEXT
+        )
+    """)
+
+
+
 
     # ========================================================
     # 後見モード Ver1.0 追加テーブル
@@ -1023,7 +1112,7 @@ def get_backup_tables():
         if table not in seen:
             tables.append((table, label))
             seen.add(table)
-    for table, label in [("nyantomo_backup_logs", "自動バックアップログ"), ("guardian_wards", "後見_被後見人"), ("guardian_cards", "後見_カード"), ("guardian_interview_logs", "後見_面談記録"), ("guardian_resource_map", "後見_リソース地図"), ("guardian_ai_support", "後見_AI支援")]:
+    for table, label in [("nyantomo_backup_logs", "自動バックアップログ"), ("consultation_cards", "相談カード整理"), ("pending_items", "保留事項"), ("guardian_wards", "後見_被後見人"), ("guardian_cards", "後見_カード"), ("guardian_interview_logs", "後見_面談記録"), ("guardian_resource_map", "後見_リソース地図"), ("guardian_ai_support", "後見_AI支援")]:
         if table not in seen:
             tables.append((table, label))
     return tables
@@ -1213,6 +1302,8 @@ def build_case_ai_source(case_id):
         ("properties", "空き家カード", ["property_name", "address", "property_status", "vacant_status", "key_hold", "neighborhood", "visit_frequency", "memo"]),
         ("cats", "猫情報カード", ["cat_name", "age", "sex", "health_memo", "life_status", "future_plan", "memo"]),
         ("family", "家族関係メモ", ["name", "relation", "contact_ok", "temperature", "memo"]),
+        ("consultation_cards", "Ver2.0カード整理", ["card_type", "card_status", "concern", "client_words", "current_state", "unknown_items", "related_people_places", "next_check_items", "memo"]),
+        ("pending_items", "Ver2.0保留事項", ["theme", "reason", "deadline_type", "next_check_date", "related_people", "caution", "status", "memo"]),
         ("line_messages", "LINEメモ", ["to_target", "message_text", "send_status", "response_memo"]),
     ]
     for table, title, cols in related_specs:
@@ -1233,12 +1324,17 @@ def build_ai_prompt(summary_type, source_text):
 相談者を急がせず、事実・未確定・保留・次回確認を分けてください。
 
 出力形式：
-1. 事実として確認できること
-2. まだ未確定なこと
-3. 相談者が今は決めなくてよいこと
-4. 急がせないための注意点
-5. 次回確認するとよいこと
-6. 内部メモ用の短い要約
+1. 今回出てきたテーマ
+2. 相談者が一番気にしていそうなこと
+3. 事実として確認できること
+4. まだ未確定なこと
+5. 今すぐ決めなくてもよいこと
+6. 少し整理した方がよいこと
+7. 次回確認事項
+8. 専門家につなぐ可能性があること
+9. にゃんともとして関われる範囲
+10. にゃんともでは扱わない方がよい範囲
+11. 内部メモ用の短い要約
 
 要約種別：{summary_type}
 
@@ -1310,6 +1406,359 @@ def save_ai_summary(case_id, client_id, summary_type, source_text, summary_text,
     return summary_id
 
 
+
+# ============================================================
+# にゃんとも相談管理 Ver2.0：カード整理OS
+# ============================================================
+
+def get_case_selector(key):
+    """案件選択UIを共通化する。"""
+    case_map, case_labels = get_case_options()
+    if not case_labels:
+        st.warning("先に相談者と案件を登録してください。")
+        return None, None
+    selected_label = st.selectbox("対象案件", case_labels, key=key)
+    case_id = case_map[selected_label]
+    client_id = case_to_client(case_id)
+    return case_id, client_id
+
+
+def render_consultation_cards():
+    st.subheader("Ver2.0｜カード整理")
+    st.caption("相談者の言葉を、猫・住まい・家族・健康・お金・制度・支援者などのカードとして並べます。答えを出すためではなく、何に悩んでいるかを見える化する画面です。")
+
+    case_id, client_id = get_case_selector("consultation_cards_case")
+    if not case_id:
+        return
+
+    st.markdown("### カード登録")
+    with st.form("consultation_card_create"):
+        c1, c2 = st.columns(2)
+        with c1:
+            card_type = st.selectbox("カード種別", NYANTOMO_CARD_TYPES)
+        with c2:
+            card_status = st.selectbox("状態", NYANTOMO_CARD_STATUS_OPTIONS)
+
+        concern = st.text_area("気になっていること")
+        client_words = st.text_area("相談者の言葉（できるだけ原文）")
+        current_state = st.text_area("現在の状態")
+        unknown_items = st.text_area("未確認事項")
+        related_people_places = st.text_area("関係する人・場所")
+        next_check_items = st.text_area("次回確認したいこと")
+        memo = st.text_area("内部メモ")
+        ok = st.form_submit_button("カードを登録する", disabled=not can_write())
+
+    if ok:
+        if not concern.strip() and not client_words.strip():
+            st.error("「気になっていること」または「相談者の言葉」を入力してください。")
+        else:
+            card_id = make_id("card")
+            execute("""
+                INSERT INTO consultation_cards
+                (card_id, case_id, client_id, created_at, updated_at, updated_by, card_type, card_status,
+                 concern, client_words, current_state, unknown_items, related_people_places, next_check_items, memo)
+                VALUES
+                (%(card_id)s, %(case_id)s, %(client_id)s, %(created_at)s, %(updated_at)s, %(updated_by)s, %(card_type)s, %(card_status)s,
+                 %(concern)s, %(client_words)s, %(current_state)s, %(unknown_items)s, %(related_people_places)s, %(next_check_items)s, %(memo)s)
+            """, {
+                "card_id": card_id,
+                "case_id": case_id,
+                "client_id": client_id,
+                "created_at": now_text(),
+                "updated_at": now_text(),
+                "updated_by": st.session_state.get("login_id", ""),
+                "card_type": card_type,
+                "card_status": card_status,
+                "concern": concern,
+                "client_words": client_words,
+                "current_state": current_state,
+                "unknown_items": unknown_items,
+                "related_people_places": related_people_places,
+                "next_check_items": next_check_items,
+                "memo": memo,
+            })
+            execute("UPDATE cases SET updated_at=%(updated_at)s WHERE case_id=%(case_id)s", {"updated_at": now_text(), "case_id": case_id})
+            log_action("create", "consultation_cards", card_id, "Ver2.0カード登録")
+            st.success("カードを登録しました。")
+            st.rerun()
+
+    st.markdown("---")
+    st.markdown("### 登録済みカード")
+    df = fetch_df("""
+        SELECT card_id, card_type, card_status, concern, client_words, current_state,
+               unknown_items, related_people_places, next_check_items, memo, updated_at
+        FROM consultation_cards
+        WHERE case_id=%(case_id)s
+        ORDER BY
+            CASE card_status
+                WHEN '気になる' THEN 1
+                WHEN '検討中' THEN 2
+                WHEN '保留' THEN 3
+                WHEN '整理済' THEN 4
+                ELSE 9
+            END,
+            updated_at DESC NULLS LAST,
+            created_at DESC
+    """, {"case_id": case_id})
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+    if not df.empty:
+        st.markdown("### カード状態の俯瞰")
+        view = df.groupby(["card_type", "card_status"], dropna=False).size().reset_index(name="件数")
+        st.dataframe(view, use_container_width=True, hide_index=True)
+
+    if not df.empty and can_write():
+        st.markdown("---")
+        selected = st.selectbox("更新・削除するカードID", df["card_id"].tolist(), key="consultation_card_edit_select")
+        row = df[df["card_id"] == selected].iloc[0]
+        with st.form("consultation_card_edit"):
+            e1, e2 = st.columns(2)
+            with e1:
+                new_card_type = st.selectbox("カード種別", NYANTOMO_CARD_TYPES, index=NYANTOMO_CARD_TYPES.index(row["card_type"]) if row["card_type"] in NYANTOMO_CARD_TYPES else 0)
+            with e2:
+                new_card_status = st.selectbox("状態", NYANTOMO_CARD_STATUS_OPTIONS, index=NYANTOMO_CARD_STATUS_OPTIONS.index(row["card_status"]) if row["card_status"] in NYANTOMO_CARD_STATUS_OPTIONS else 0)
+
+            new_concern = st.text_area("気になっていること", normalize_text(row["concern"]))
+            new_client_words = st.text_area("相談者の言葉（できるだけ原文）", normalize_text(row["client_words"]))
+            new_current_state = st.text_area("現在の状態", normalize_text(row["current_state"]))
+            new_unknown_items = st.text_area("未確認事項", normalize_text(row["unknown_items"]))
+            new_related_people_places = st.text_area("関係する人・場所", normalize_text(row["related_people_places"]))
+            new_next_check_items = st.text_area("次回確認したいこと", normalize_text(row["next_check_items"]))
+            new_memo = st.text_area("内部メモ", normalize_text(row["memo"]))
+            delete_confirm = st.checkbox("このカードを削除することを確認しました。")
+            delete_text = st.text_input("削除する場合は DELETE と入力", key="consultation_card_delete_text")
+            c1, c2 = st.columns(2)
+            update = c1.form_submit_button("更新する")
+            delete = c2.form_submit_button("削除する")
+
+        if update:
+            execute("""
+                UPDATE consultation_cards
+                SET updated_at=%(updated_at)s, updated_by=%(updated_by)s, card_type=%(card_type)s, card_status=%(card_status)s,
+                    concern=%(concern)s, client_words=%(client_words)s, current_state=%(current_state)s, unknown_items=%(unknown_items)s,
+                    related_people_places=%(related_people_places)s, next_check_items=%(next_check_items)s, memo=%(memo)s
+                WHERE card_id=%(card_id)s
+            """, {
+                "updated_at": now_text(),
+                "updated_by": st.session_state.get("login_id", ""),
+                "card_type": new_card_type,
+                "card_status": new_card_status,
+                "concern": new_concern,
+                "client_words": new_client_words,
+                "current_state": new_current_state,
+                "unknown_items": new_unknown_items,
+                "related_people_places": new_related_people_places,
+                "next_check_items": new_next_check_items,
+                "memo": new_memo,
+                "card_id": selected,
+            })
+            log_action("update", "consultation_cards", selected, "Ver2.0カード更新")
+            st.success("カードを更新しました。")
+            st.rerun()
+
+        if delete:
+            if not delete_confirm or delete_text != "DELETE":
+                st.error("削除するには確認チェックを入れ、DELETE と入力してください。")
+            else:
+                execute("DELETE FROM consultation_cards WHERE card_id=%(card_id)s", {"card_id": selected})
+                log_action("delete", "consultation_cards", selected, "Ver2.0カード削除")
+                st.success("カードを削除しました。")
+                st.rerun()
+
+
+def render_pending_items():
+    st.subheader("Ver2.0｜保留事項管理")
+    st.caption("今すぐ決めなくてよいことを、安全に置いておくための画面です。保留は放置ではなく、次に確認する余白として管理します。")
+
+    case_id, client_id = get_case_selector("pending_items_case")
+    if not case_id:
+        return
+
+    st.markdown("### 保留事項登録")
+    with st.form("pending_item_create"):
+        theme = st.text_input("保留しているテーマ")
+        reason = st.text_area("保留理由")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            deadline_type = st.selectbox("期限の有無", PENDING_DEADLINE_OPTIONS)
+        with c2:
+            next_check_date = st.date_input("次回確認日", value=None)
+        with c3:
+            status = st.selectbox("状態", PENDING_STATUS_OPTIONS)
+        related_people = st.text_area("関係者")
+        caution = st.text_area("注意点")
+        memo = st.text_area("内部メモ")
+        ok = st.form_submit_button("保留事項を登録する", disabled=not can_write())
+
+    if ok:
+        if not theme.strip():
+            st.error("保留しているテーマを入力してください。")
+        else:
+            pending_id = make_id("pending")
+            execute("""
+                INSERT INTO pending_items
+                (pending_id, case_id, client_id, created_at, updated_at, updated_by, theme, reason,
+                 deadline_type, next_check_date, related_people, caution, status, memo)
+                VALUES
+                (%(pending_id)s, %(case_id)s, %(client_id)s, %(created_at)s, %(updated_at)s, %(updated_by)s, %(theme)s, %(reason)s,
+                 %(deadline_type)s, %(next_check_date)s, %(related_people)s, %(caution)s, %(status)s, %(memo)s)
+            """, {
+                "pending_id": pending_id,
+                "case_id": case_id,
+                "client_id": client_id,
+                "created_at": now_text(),
+                "updated_at": now_text(),
+                "updated_by": st.session_state.get("login_id", ""),
+                "theme": theme,
+                "reason": reason,
+                "deadline_type": deadline_type,
+                "next_check_date": next_check_date,
+                "related_people": related_people,
+                "caution": caution,
+                "status": status,
+                "memo": memo,
+            })
+            execute("UPDATE cases SET updated_at=%(updated_at)s WHERE case_id=%(case_id)s", {"updated_at": now_text(), "case_id": case_id})
+            log_action("create", "pending_items", pending_id, "Ver2.0保留事項登録")
+            st.success("保留事項を登録しました。")
+            st.rerun()
+
+    st.markdown("---")
+    st.markdown("### 保留事項一覧")
+    df = fetch_df("""
+        SELECT pending_id, theme, reason, deadline_type, next_check_date, related_people, caution, status, memo, updated_at
+        FROM pending_items
+        WHERE case_id=%(case_id)s
+        ORDER BY
+            CASE status
+                WHEN '保留中' THEN 1
+                WHEN '次回確認' THEN 2
+                WHEN '家族確認待ち' THEN 3
+                WHEN '専門家確認待ち' THEN 4
+                WHEN '整理済' THEN 5
+                WHEN '終了' THEN 6
+                ELSE 9
+            END,
+            next_check_date ASC NULLS LAST,
+            updated_at DESC NULLS LAST
+    """, {"case_id": case_id})
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+    if not df.empty and can_write():
+        st.markdown("---")
+        selected = st.selectbox("更新・削除する保留事項ID", df["pending_id"].tolist(), key="pending_item_edit_select")
+        row = df[df["pending_id"] == selected].iloc[0]
+        with st.form("pending_item_edit"):
+            new_theme = st.text_input("保留しているテーマ", normalize_text(row["theme"]))
+            new_reason = st.text_area("保留理由", normalize_text(row["reason"]))
+            e1, e2, e3 = st.columns(3)
+            with e1:
+                new_deadline_type = st.selectbox("期限の有無", PENDING_DEADLINE_OPTIONS, index=PENDING_DEADLINE_OPTIONS.index(row["deadline_type"]) if row["deadline_type"] in PENDING_DEADLINE_OPTIONS else 0)
+            with e2:
+                new_next_check_date = st.date_input("次回確認日", date_or_none(row["next_check_date"]))
+            with e3:
+                new_status = st.selectbox("状態", PENDING_STATUS_OPTIONS, index=PENDING_STATUS_OPTIONS.index(row["status"]) if row["status"] in PENDING_STATUS_OPTIONS else 0)
+            new_related_people = st.text_area("関係者", normalize_text(row["related_people"]))
+            new_caution = st.text_area("注意点", normalize_text(row["caution"]))
+            new_memo = st.text_area("内部メモ", normalize_text(row["memo"]))
+            delete_confirm = st.checkbox("この保留事項を削除することを確認しました。")
+            delete_text = st.text_input("削除する場合は DELETE と入力", key="pending_item_delete_text")
+            c1, c2 = st.columns(2)
+            update = c1.form_submit_button("更新する")
+            delete = c2.form_submit_button("削除する")
+
+        if update:
+            execute("""
+                UPDATE pending_items
+                SET updated_at=%(updated_at)s, updated_by=%(updated_by)s, theme=%(theme)s, reason=%(reason)s,
+                    deadline_type=%(deadline_type)s, next_check_date=%(next_check_date)s, related_people=%(related_people)s,
+                    caution=%(caution)s, status=%(status)s, memo=%(memo)s
+                WHERE pending_id=%(pending_id)s
+            """, {
+                "updated_at": now_text(),
+                "updated_by": st.session_state.get("login_id", ""),
+                "theme": new_theme,
+                "reason": new_reason,
+                "deadline_type": new_deadline_type,
+                "next_check_date": new_next_check_date,
+                "related_people": new_related_people,
+                "caution": new_caution,
+                "status": new_status,
+                "memo": new_memo,
+                "pending_id": selected,
+            })
+            log_action("update", "pending_items", selected, "Ver2.0保留事項更新")
+            st.success("保留事項を更新しました。")
+            st.rerun()
+
+        if delete:
+            if not delete_confirm or delete_text != "DELETE":
+                st.error("削除するには確認チェックを入れ、DELETE と入力してください。")
+            else:
+                execute("DELETE FROM pending_items WHERE pending_id=%(pending_id)s", {"pending_id": selected})
+                log_action("delete", "pending_items", selected, "Ver2.0保留事項削除")
+                st.success("保留事項を削除しました。")
+                st.rerun()
+
+
+def render_card_os_overview():
+    st.subheader("Ver2.0｜判断の時間を守るカード整理OS")
+    st.caption("カード整理・保留事項・AI要約を横断して、相談者が安心して迷える状態を確認する画面です。")
+
+    case_id, client_id = get_case_selector("card_os_overview_case")
+    if not case_id:
+        return
+
+    card_df = fetch_df("""
+        SELECT card_type, card_status, concern, client_words, next_check_items, updated_at
+        FROM consultation_cards
+        WHERE case_id=%(case_id)s
+        ORDER BY updated_at DESC NULLS LAST, created_at DESC
+    """, {"case_id": case_id})
+    pending_df = fetch_df("""
+        SELECT theme, status, next_check_date, reason, caution, updated_at
+        FROM pending_items
+        WHERE case_id=%(case_id)s
+        ORDER BY next_check_date ASC NULLS LAST, updated_at DESC NULLS LAST
+    """, {"case_id": case_id})
+    summary_df = fetch_df("""
+        SELECT created_at, summary_type, summary_text
+        FROM ai_summaries
+        WHERE case_id=%(case_id)s
+        ORDER BY created_at DESC
+        LIMIT 5
+    """, {"case_id": case_id})
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("カード数", len(card_df))
+    c2.metric("保留事項", len(pending_df))
+    c3.metric("AI要約", len(summary_df))
+
+    st.markdown("---")
+    left, right = st.columns(2)
+    with left:
+        st.markdown("### カード整理")
+        if card_df.empty:
+            st.info("カードはまだ登録されていません。")
+        else:
+            st.dataframe(card_df, use_container_width=True, hide_index=True, height=300)
+
+    with right:
+        st.markdown("### 保留事項")
+        if pending_df.empty:
+            st.info("保留事項はまだ登録されていません。")
+        else:
+            st.dataframe(pending_df, use_container_width=True, hide_index=True, height=300)
+
+    st.markdown("---")
+    st.markdown("### 最近のAI要約")
+    if summary_df.empty:
+        st.info("AI要約はまだ保存されていません。")
+    else:
+        st.dataframe(summary_df, use_container_width=True, hide_index=True)
+
+
+
 def render_ai_summary():
     st.subheader("AI要約メモ")
     st.caption("AIは判断係ではなく、記録の整理係として使います。事実・未確定・保留・次回確認を分けて保存します。")
@@ -1328,7 +1777,7 @@ def render_ai_summary():
     with st.expander("AIに渡す元データを確認", expanded=False):
         st.text_area("元データ", source_text, height=300)
 
-    summary_type = st.selectbox("要約種別", ["初回相談整理", "次回確認メモ", "家族共有前の整理", "内部メモ整理", "終了時整理", "その他"])
+    summary_type = st.selectbox("要約種別", ["Ver2.0カード整理", "初回相談整理", "次回確認メモ", "家族共有前の整理", "内部メモ整理", "相談者向け要約", "終了時整理", "その他"])
     extra_instruction = st.text_area("追加指示（任意）", placeholder="例：相談者に見せる前提ではなく、内部用に短めに整理")
 
     col1, col2 = st.columns([1, 1])
@@ -2052,8 +2501,12 @@ def render_db_connection_check():
 
 def render_data_check():
     st.subheader("データ確認")
-    tabs = st.tabs([label for _, label in TABLES])
-    for tab, (table, label) in zip(tabs, TABLES):
+    data_tables = list(TABLES)
+    for extra_table, extra_label in [("consultation_cards", "Ver2.0_カード整理"), ("pending_items", "Ver2.0_保留事項"), ("ai_summaries", "AI要約")]:
+        if extra_table not in [t for t, _ in data_tables]:
+            data_tables.append((extra_table, extra_label))
+    tabs = st.tabs([label for _, label in data_tables])
+    for tab, (table, label) in zip(tabs, data_tables):
         with tab:
             try:
                 df = fetch_df(f"SELECT * FROM {table} ORDER BY 1")
@@ -2156,6 +2609,15 @@ elif role == VIEWER_ROLE:
 else:
     available_menus = STAFF_MENUS
 
+NYANTOMO_V2_MENUS = [
+    "Ver2.0｜カードOS俯瞰",
+    "Ver2.0｜カード整理",
+    "Ver2.0｜保留事項管理",
+]
+for m in NYANTOMO_V2_MENUS:
+    if m not in available_menus:
+        available_menus.append(m)
+
 GUARDIAN_MENUS = [
     "DB接続確認",
     "後見ダッシュボード",
@@ -2192,6 +2654,12 @@ elif menu == "案件 登録・検索・更新・削除":
     render_cases()
 elif menu == "相談履歴 登録・確認":
     render_history()
+elif menu == "Ver2.0｜カードOS俯瞰":
+    render_card_os_overview()
+elif menu == "Ver2.0｜カード整理":
+    render_consultation_cards()
+elif menu == "Ver2.0｜保留事項管理":
+    render_pending_items()
 elif menu == "空き家カード":
     related_card_page("properties", "property_id", "空き家カード", [
         ("property_name", "物件名", "text"),
