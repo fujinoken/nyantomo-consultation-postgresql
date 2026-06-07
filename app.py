@@ -1381,32 +1381,76 @@ def build_case_ai_source(case_id):
 
 
 def build_ai_prompt(summary_type, source_text):
+    """Ver2.2：カード整理AI用プロンプト。
+    相談記録の一般要約ではなく、カード・保留・次回確認を中心に整理する。
+    """
     return f"""
-あなたは『にゃんとも 住まいと猫の相談室』の内部記録整理係です。
-役割は、相談記録を整理することだけです。
-法律判断、医療判断、不動産判断、税務判断、断定的助言はしないでください。
-相談者を急がせず、事実・未確定・保留・次回確認を分けてください。
+あなたは『にゃんとも 住まいと猫の相談室』の内部用「カード整理AI」です。
+役割は、相談記録を一般的に要約することではありません。
+相談者の言葉・基本情報カード・Ver2.1判断カード・保留事項を読み取り、
+「いま机の上に並んでいるカード」を見える化してください。
 
-出力形式：
-1. 今回出てきたテーマ
-2. 相談者が一番気にしていそうなこと
-3. 事実として確認できること
-4. まだ未確定なこと
-5. 今すぐ決めなくてもよいこと
-6. 少し整理した方がよいこと
-7. 次回確認事項
-8. 専門家につなぐ可能性があること
-9. にゃんともとして関われる範囲
-10. にゃんともでは扱わない方がよい範囲
-11. 内部メモ用の短い要約
+最重要ルール：
+- 法律判断、医療判断、不動産判断、税務判断はしない
+- 売却すべき、後見すべき、信託すべき等の結論を出さない
+- 相談者を急がせない
+- 断定しない
+- 診断しない
+- スコア化しない
+- 相談者の言葉を勝手に強い表現へ変えない
+- 事実、未確定、保留、次回確認を分ける
+- にゃんともは「判断の時間を守る」立場で整理する
 
-要約種別：{summary_type}
+出力形式は必ず以下の見出しで作成してください。
 
-以下の記録を整理してください。
+## 1. 今回見えているテーマ
+- 例：猫の将来
+- 例：空き家管理
+- 例：家族との温度差
+
+## 2. いま机の上に並んでいるカード
+カードごとに、次の形で整理してください。
+- 🐾 カード種別：
+- 関連する基本情報：
+- 状態：
+- 相談者の言葉・気になっていること：
+- 未確認事項：
+- 次回確認：
+
+## 3. 今すぐ決めなくてよいこと
+- 例：売却時期
+- 例：後見制度を使うかどうか
+- 例：猫の預け先を最終決定すること
+
+## 4. 少し整理した方がよいこと
+- 例：兄との話し合い状況
+- 例：鍵の所在
+- 例：動物病院・預け先候補
+
+## 5. 次回確認
+- 次回の面談・連絡で確認するとよいことを3〜5個に絞る
+
+## 6. 専門家につなぐ可能性
+- 弁護士、司法書士、税理士、宅建士、ケアマネ、包括、動物病院など
+- ただし「必要」と断定せず「可能性」として整理する
+
+## 7. にゃんともとして関われる範囲
+- 相談整理、記録、空き家見守り、関係者整理、次回確認など
+- 断定や交渉ではなく、整理・保留・伴走の範囲で書く
+
+## 8. にゃんともでは扱わない方がよい範囲
+- 紛争、税務判断、登記、医療判断、強い不動産判断など
+- 必要に応じて他専門職へつなぐ可能性として書く
+
+## 9. 内部メモ用の短い要約
+3〜5行で、今回の相談の見取り図を短くまとめる。
+
+整理種別：{summary_type}
+
+以下の記録をカード整理してください。
 ---
 {source_text}
 """.strip()
-
 
 def call_openai_summary(prompt):
     api_key = get_openai_api_key()
@@ -2111,8 +2155,8 @@ def render_card_os_overview():
 
 
 def render_ai_summary():
-    st.subheader("AI要約メモ")
-    st.caption("AIは判断係ではなく、記録の整理係として使います。事実・未確定・保留・次回確認を分けて保存します。")
+    st.subheader("カード整理AI")
+    st.caption("相談記録を単に要約するのではなく、相談者の悩み・基本情報カード・保留事項を読み取り、カードとして並べ直します。")
 
     case_map, case_labels = get_case_options()
     if not case_labels:
@@ -2125,54 +2169,112 @@ def render_ai_summary():
 
     source_text = build_case_ai_source(case_id)
 
-    with st.expander("AIに渡す元データを確認", expanded=False):
-        st.text_area("元データ", source_text, height=300)
+    st.info("出力の中心は「今回見えているテーマ」「今すぐ決めなくてよいこと」「次回確認」です。AIは判断者ではなく、カード整理係として使います。")
 
-    summary_type = st.selectbox("要約種別", ["Ver2.0カード整理", "初回相談整理", "次回確認メモ", "家族共有前の整理", "内部メモ整理", "相談者向け要約", "終了時整理", "その他"])
-    extra_instruction = st.text_area("追加指示（任意）", placeholder="例：相談者に見せる前提ではなく、内部用に短めに整理")
+    preview_cols = st.columns(3)
+    with preview_cols[0]:
+        card_count = fetch_one("SELECT COUNT(*) AS count FROM consultation_cards WHERE case_id=%(case_id)s", {"case_id": case_id})
+        st.metric("判断カード", int(card_count.get("count", 0)) if card_count else 0)
+    with preview_cols[1]:
+        pending_count = fetch_one("SELECT COUNT(*) AS count FROM pending_items WHERE case_id=%(case_id)s", {"case_id": case_id})
+        st.metric("保留事項", int(pending_count.get("count", 0)) if pending_count else 0)
+    with preview_cols[2]:
+        summary_count = fetch_one("SELECT COUNT(*) AS count FROM ai_summaries WHERE case_id=%(case_id)s", {"case_id": case_id})
+        st.metric("保存済み整理", int(summary_count.get("count", 0)) if summary_count else 0)
+
+    with st.expander("AIに渡す元データを確認", expanded=False):
+        st.text_area("元データ", source_text, height=320)
+
+    summary_type = st.selectbox(
+        "整理種別",
+        [
+            "カード整理AI｜初回整理",
+            "カード整理AI｜次回確認",
+            "カード整理AI｜保留事項整理",
+            "カード整理AI｜家族共有前整理",
+            "カード整理AI｜内部メモ",
+            "カード整理AI｜相談者向けやわらか要約",
+            "カード整理AI｜終了時整理",
+            "その他",
+        ],
+    )
+    extra_instruction = st.text_area(
+        "追加指示（任意）",
+        placeholder="例：今回は『今すぐ決めなくてよいこと』と『次回確認』を短く整理してください。",
+    )
+
+    with st.expander("カード整理AIの出力イメージ", expanded=False):
+        st.markdown("""
+```text
+## 1. 今回見えているテーマ
+- 猫の将来
+- 空き家管理
+- 家族との温度差
+
+## 3. 今すぐ決めなくてよいこと
+- 売却時期
+- 後見制度を使うかどうか
+
+## 5. 次回確認
+- 兄との話し合い状況
+- 猫の預け先候補
+- 鍵の所在
+```
+""")
 
     col1, col2 = st.columns([1, 1])
     with col1:
-        run_ai = st.button("AI要約を作成して保存", disabled=not can_write())
+        run_ai = st.button("カード整理AIを作成して保存", disabled=not can_write())
     with col2:
         st.caption(f"使用モデル：{get_openai_model()} / APIキー：{'設定あり' if get_openai_api_key() else '未設定'}")
 
     if run_ai:
         if not source_text.strip():
-            st.error("要約対象のデータがありません。")
+            st.error("整理対象のデータがありません。")
         else:
             prompt = build_ai_prompt(summary_type, source_text)
             if extra_instruction.strip():
                 prompt += f"\n\n追加指示：{extra_instruction.strip()}"
             try:
-                with st.spinner("AI要約を作成しています..."):
+                with st.spinner("カード整理AIを作成しています..."):
                     summary_text, model = call_openai_summary(prompt)
                     save_ai_summary(case_id, client_id, summary_type, source_text, summary_text, extra_instruction, model)
-                st.success("AI要約を保存しました。")
+                st.success("カード整理AIを保存しました。")
                 st.rerun()
             except Exception as e:
-                st.error("AI要約の作成に失敗しました。")
+                st.error("カード整理AIの作成に失敗しました。")
                 st.exception(e)
 
     st.markdown("---")
-    st.markdown("### 保存済みAI要約")
+    st.markdown("### 保存済みカード整理AI")
     df = fetch_df("""
         SELECT summary_id, created_at, summary_type, summary_text, memo
         FROM ai_summaries
         WHERE case_id=%(case_id)s
         ORDER BY created_at DESC
     """, {"case_id": case_id})
-    st.dataframe(df, use_container_width=True, hide_index=True)
+
+    if df.empty:
+        st.info("保存済みのカード整理AIはありません。")
+    else:
+        for _, row in df.iterrows():
+            with st.expander(f"{row.get('created_at', '')}｜{row.get('summary_type', '')}", expanded=False):
+                st.markdown(row.get("summary_text", ""))
+                if normalize_text(row.get("memo", "")):
+                    st.caption(f"追加指示：{row.get('memo', '')}")
+
+        st.markdown("#### 一覧")
+        st.dataframe(df, use_container_width=True, hide_index=True)
 
     if not df.empty and can_write():
-        selected = st.selectbox("削除するAI要約ID", df["summary_id"].tolist())
-        delete_confirm = st.checkbox("このAI要約を削除することを確認しました。")
-        if st.button("選択したAI要約を削除"):
+        selected = st.selectbox("削除するカード整理AI ID", df["summary_id"].tolist())
+        delete_confirm = st.checkbox("このカード整理AIを削除することを確認しました。")
+        if st.button("選択したカード整理AIを削除"):
             if not delete_confirm:
                 st.error("削除するには確認チェックを入れてください。")
             else:
                 execute("DELETE FROM ai_summaries WHERE summary_id=%(id)s", {"id": selected})
-                log_action("delete", "ai_summaries", selected, "AI要約削除")
+                log_action("delete", "ai_summaries", selected, "カード整理AI削除")
                 st.success("削除しました。")
                 st.rerun()
 
