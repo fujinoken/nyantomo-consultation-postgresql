@@ -1951,8 +1951,8 @@ def render_nyantomo_card_tile(icon, title, headline, status, detail="", footer="
 
 
 def render_card_os_overview():
-    st.subheader("Ver2.1｜判断の時間を守るカード整理OS")
-    st.caption("相談者の悩みを、件数表ではなく“見えるカード”として並べる画面です。何を急がず、何を次に確認するかを一目で確認します。")
+    st.subheader("Ver2.4｜カードOS俯瞰")
+    st.caption("件数表ではなく、相談者の前に並んでいるカードを1枚ずつ見える化します。相談の入口で『いま何が机の上にあるか』を確認する画面です。")
 
     st.markdown("""
     <style>
@@ -1960,43 +1960,43 @@ def render_card_os_overview():
         background: #ffffff;
         border: 1px solid #e8edf5;
         border-radius: 18px;
-        padding: 16px 17px;
+        padding: 17px 18px;
         margin-bottom: 12px;
         box-shadow: 0 7px 18px rgba(30, 41, 59, 0.06);
-        min-height: 145px;
+        min-height: 118px;
     }
     .ny-os-title {
-        font-weight: 800;
+        font-weight: 900;
         color: #172033;
-        font-size: 1.04rem;
-        margin-bottom: 8px;
+        font-size: 1.08rem;
+        margin-bottom: 7px;
     }
     .ny-os-icon {
-        font-size: 1.12rem;
-        margin-right: 2px;
+        font-size: 1.22rem;
+        margin-right: 4px;
     }
     .ny-os-headline {
-        font-size: 1.02rem;
-        font-weight: 700;
+        font-size: 1.05rem;
+        font-weight: 800;
         color: #334155;
         line-height: 1.45;
         margin-bottom: 8px;
     }
     .ny-os-status {
         display: inline-block;
-        padding: 3px 9px;
+        padding: 3px 10px;
         border-radius: 999px;
         background: #f8fafc;
         border: 1px solid #e2e8f0;
         color: #475569;
         font-size: 0.86rem;
-        font-weight: 700;
+        font-weight: 800;
         margin-bottom: 8px;
     }
     .ny-os-detail {
         color: #64748b;
         font-size: 0.9rem;
-        line-height: 1.45;
+        line-height: 1.5;
         margin-top: 6px;
     }
     .ny-os-footer {
@@ -2012,6 +2012,16 @@ def render_card_os_overview():
         margin: 8px 0 16px;
         color: #475569;
         line-height: 1.55;
+    }
+    .ny-os-divider {
+        border: none;
+        border-top: 1px dashed #d7dee8;
+        margin: 14px 0 14px;
+    }
+    .ny-os-mini {
+        color: #64748b;
+        font-size: 0.88rem;
+        line-height: 1.5;
     }
     </style>
     """, unsafe_allow_html=True)
@@ -2076,59 +2086,74 @@ def render_card_os_overview():
 
     st.markdown("""
     <div class="ny-os-note">
-    🐾 この画面は、相談者の悩みを“処理する案件”ではなく、机の上に並べたカードとして眺めるための画面です。<br>
-    🟥 気になる　🟧 確認待ち　🟨 検討・保留　🟩 整理済 の目安で確認します。
+    🐾 この画面は、相談者の悩みを“件数”ではなく“1枚ずつのカード”として眺めるための画面です。<br>
+    🟥 気になる　🟧 家族・専門家・次回確認待ち　🟨 検討・保留　🟩 整理済 の目安で確認します。
     </div>
     """, unsafe_allow_html=True)
 
-    st.markdown("### いま見えているカード")
+    def card_sort_key(row):
+        status = normalize_text(row.get("card_status", ""))
+        order = {"気になる": 1, "検討中": 2, "保留": 3, "整理済": 4}
+        return order.get(status, 9)
+
+    st.markdown("### いま机の上に並んでいるカード")
     if card_df.empty:
         st.info("カードはまだ登録されていません。『Ver2.0｜カード整理』から登録してください。")
     else:
-        for card_type in NYANTOMO_CARD_TYPES:
-            group = card_df[card_df["card_type"] == card_type]
-            if group.empty:
-                continue
-            st.markdown(f"#### {card_type}")
-            cols = st.columns(2)
-            for i, (_, row) in enumerate(group.iterrows()):
-                icon = ny_card_status_icon(row.get("card_status", ""))
-                headline = ny_pick_summary(row.get("concern", ""), row.get("current_state", ""), row.get("client_words", ""))
-                detail_parts = []
-                related_label = normalize_text(row.get("related_label", ""))
-                next_check = normalize_text(row.get("next_check_items", ""))
-                unknown = normalize_text(row.get("unknown_items", ""))
-                if related_label:
-                    detail_parts.append(f"基本情報：{related_label}")
-                if next_check:
-                    detail_parts.append(f"次回確認：{next_check}")
-                elif unknown:
-                    detail_parts.append(f"未確認：{unknown}")
-                detail = "／".join(detail_parts)
-                footer = f"更新：{normalize_text(row.get('updated_at', ''))}"
-                with cols[i % 2]:
-                    render_nyantomo_card_tile(icon, card_type.replace("カード", ""), headline, row.get("card_status", ""), detail, footer)
+        # グループ別の件数表ではなく、優先度順に1枚ずつ縦に並べる
+        sorted_rows = sorted([row for _, row in card_df.iterrows()], key=card_sort_key)
+        for idx, row in enumerate(sorted_rows):
+            icon = ny_card_status_icon(row.get("card_status", ""))
+            title = normalize_text(row.get("card_type", "")).replace("カード", "") or "カード"
+            headline = ny_pick_summary(row.get("concern", ""), row.get("current_state", ""), row.get("client_words", ""), max_len=48)
+            detail_parts = []
+            related_label = normalize_text(row.get("related_label", ""))
+            client_words = normalize_text(row.get("client_words", ""))
+            unknown = normalize_text(row.get("unknown_items", ""))
+            next_check = normalize_text(row.get("next_check_items", ""))
+            related_people = normalize_text(row.get("related_people_places", ""))
+            if related_label:
+                detail_parts.append(f"基本情報：{related_label}")
+            if client_words:
+                detail_parts.append(f"相談者の言葉：{ny_pick_summary(client_words, max_len=44)}")
+            if unknown:
+                detail_parts.append(f"未確認：{ny_pick_summary(unknown, max_len=44)}")
+            if next_check:
+                detail_parts.append(f"次回確認：{ny_pick_summary(next_check, max_len=44)}")
+            if related_people:
+                detail_parts.append(f"関係者・場所：{ny_pick_summary(related_people, max_len=44)}")
+            detail = "<br>".join([html.escape(x) for x in detail_parts])
+            footer = f"更新：{normalize_text(row.get('updated_at', ''))}"
+            render_nyantomo_card_tile(icon, title, headline, row.get("card_status", ""), "", footer)
+            if detail:
+                st.markdown(f"<div class='ny-os-mini'>{detail}</div>", unsafe_allow_html=True)
+            if idx != len(sorted_rows) - 1:
+                st.markdown("<hr class='ny-os-divider'>", unsafe_allow_html=True)
 
     st.markdown("---")
     st.markdown("### 保留事項カード")
     if pending_df.empty:
         st.info("保留事項はまだ登録されていません。『Ver2.0｜保留事項管理』から登録してください。")
     else:
-        cols = st.columns(2)
-        for i, (_, row) in enumerate(pending_df.iterrows()):
+        for idx, (_, row) in enumerate(pending_df.iterrows()):
             icon = ny_pending_status_icon(row.get("status", ""))
-            headline = ny_pick_summary(row.get("theme", ""), row.get("reason", ""))
+            headline = ny_pick_summary(row.get("theme", ""), row.get("reason", ""), max_len=48)
             detail_parts = []
+            if normalize_text(row.get("reason", "")):
+                detail_parts.append(f"理由：{ny_pick_summary(row.get('reason', ''), max_len=44)}")
             if normalize_text(row.get("next_check_date", "")):
                 detail_parts.append(f"次回確認日：{normalize_text(row.get('next_check_date', ''))}")
             if normalize_text(row.get("related_people", "")):
-                detail_parts.append(f"関係者：{normalize_text(row.get('related_people', ''))}")
+                detail_parts.append(f"関係者：{ny_pick_summary(row.get('related_people', ''), max_len=44)}")
             if normalize_text(row.get("caution", "")):
-                detail_parts.append(f"注意：{normalize_text(row.get('caution', ''))}")
-            detail = "／".join(detail_parts)
+                detail_parts.append(f"注意：{ny_pick_summary(row.get('caution', ''), max_len=44)}")
+            detail = "<br>".join([html.escape(x) for x in detail_parts])
             footer = f"更新：{normalize_text(row.get('updated_at', ''))}"
-            with cols[i % 2]:
-                render_nyantomo_card_tile(icon, "保留事項", headline, row.get("status", ""), detail, footer)
+            render_nyantomo_card_tile(icon, "保留事項", headline, row.get("status", ""), "", footer)
+            if detail:
+                st.markdown(f"<div class='ny-os-mini'>{detail}</div>", unsafe_allow_html=True)
+            if idx != len(pending_df) - 1:
+                st.markdown("<hr class='ny-os-divider'>", unsafe_allow_html=True)
 
     st.markdown("---")
     with st.expander("表形式で確認する", expanded=False):
@@ -2145,14 +2170,13 @@ def render_card_os_overview():
             st.dataframe(pending_df, use_container_width=True, hide_index=True, height=260)
 
     st.markdown("---")
-    st.markdown("### 最近のAI要約")
+    st.markdown("### 最近のカード整理AI")
     if summary_df.empty:
-        st.info("AI要約はまだ保存されていません。")
+        st.info("カード整理AIはまだ保存されていません。")
     else:
         for _, row in summary_df.iterrows():
             with st.expander(f"{row.get('created_at', '')}｜{row.get('summary_type', '')}", expanded=False):
                 st.write(row.get("summary_text", ""))
-
 
 def render_ai_summary():
     st.subheader("カード整理AI")
