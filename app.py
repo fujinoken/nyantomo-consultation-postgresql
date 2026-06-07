@@ -90,6 +90,30 @@ SUPPORT_CATEGORY_OPTIONS = [
     "その他",
 ]
 
+# Ver2.1：判断カードと基本情報カードの紐付け
+# 猫情報カード・空き家カード・家族関係メモは「基本情報」、
+# Ver2.xカードは「悩み・判断・保留」を整理する上位カードとして扱います。
+RELATED_BASE_CARD_MAP = {
+    "猫カード": {
+        "table": "cats",
+        "id_col": "cat_id",
+        "label_sql": "COALESCE(NULLIF(cat_name,''), '猫情報') || COALESCE('｜' || NULLIF(age,''), '') || COALESCE('｜' || NULLIF(sex,''), '')",
+        "label": "猫情報カード",
+    },
+    "住まいカード": {
+        "table": "properties",
+        "id_col": "property_id",
+        "label_sql": "COALESCE(NULLIF(property_name,''), '物件') || COALESCE('｜' || NULLIF(address,''), '')",
+        "label": "空き家カード",
+    },
+    "家族カード": {
+        "table": "family",
+        "id_col": "family_id",
+        "label_sql": "COALESCE(NULLIF(name,''), '家族') || COALESCE('｜' || NULLIF(relation,''), '') || COALESCE('｜' || NULLIF(temperature,''), '')",
+        "label": "家族関係メモ",
+    },
+}
+
 
 
 
@@ -1001,6 +1025,19 @@ def ensure_extension_tables():
             memo TEXT
         )
     """)
+    # Ver2.1：基本情報カードとの紐付け用カラム
+    # related_table: cats / properties / family
+    # related_id: cat_id / property_id / family_id
+    # related_label: 表示用ラベル（登録時点の控え）
+    for _col_sql in [
+        "ALTER TABLE consultation_cards ADD COLUMN IF NOT EXISTS related_table TEXT",
+        "ALTER TABLE consultation_cards ADD COLUMN IF NOT EXISTS related_id TEXT",
+        "ALTER TABLE consultation_cards ADD COLUMN IF NOT EXISTS related_label TEXT",
+    ]:
+        try:
+            execute(_col_sql)
+        except Exception:
+            pass
     execute("""
         CREATE TABLE IF NOT EXISTS pending_items (
             pending_id TEXT PRIMARY KEY,
@@ -1329,7 +1366,7 @@ def build_case_ai_source(case_id):
         ("properties", "空き家カード", ["property_name", "address", "property_status", "vacant_status", "key_hold", "neighborhood", "visit_frequency", "memo"]),
         ("cats", "猫情報カード", ["cat_name", "age", "sex", "health_memo", "life_status", "future_plan", "memo"]),
         ("family", "家族関係メモ", ["name", "relation", "contact_ok", "temperature", "memo"]),
-        ("consultation_cards", "Ver2.0カード整理", ["card_type", "card_status", "concern", "client_words", "current_state", "unknown_items", "related_people_places", "next_check_items", "memo"]),
+        ("consultation_cards", "Ver2.1カード整理", ["card_type", "card_status", "related_label", "concern", "client_words", "current_state", "unknown_items", "related_people_places", "next_check_items", "memo"]),
         ("pending_items", "Ver2.0保留事項", ["theme", "reason", "deadline_type", "next_check_date", "related_people", "caution", "status", "memo"]),
         ("line_messages", "LINEメモ", ["to_target", "message_text", "send_status", "response_memo"]),
     ]
@@ -1450,21 +1487,74 @@ def get_case_selector(key):
     return case_id, client_id
 
 
+def get_related_base_options(card_type, case_id):
+    """Ver2.1：カード種別に応じて、紐付け可能な基本情報カードを返す。"""
+    spec = RELATED_BASE_CARD_MAP.get(card_type)
+    if not spec:
+        return {}, ["紐付けなし"], "", ""
+
+    table = spec["table"]
+    id_col = spec["id_col"]
+    label_sql = spec["label_sql"]
+    base_label = spec["label"]
+    try:
+        df = fetch_df(f"""
+            SELECT {id_col} AS related_id, {label_sql} AS related_label
+            FROM {table}
+            WHERE case_id=%(case_id)s
+            ORDER BY created_at DESC
+        """, {"case_id": case_id})
+    except Exception:
+        return {}, ["紐付けなし"], spec["table"], base_label
+
+    mapping = {"紐付けなし": ("", "")}
+    labels = ["紐付けなし"]
+    if df is not None and not df.empty:
+        for _, r in df.iterrows():
+            rid = normalize_text(r.get("related_id", ""))
+            rlabel = normalize_text(r.get("related_label", ""))
+            if rid:
+                label = f"{base_label}｜{rlabel}｜{rid}"
+                labels.append(label)
+                mapping[label] = (rid, f"{base_label}｜{rlabel}")
+    return mapping, labels, spec["table"], base_label
+
+
+def find_related_label(labels, mapping, related_id):
+    """保存済みrelated_idからselectbox初期値のindexを探す。"""
+    related_id = normalize_text(related_id)
+    if not related_id:
+        return "紐付けなし"
+    for label, (rid, _) in mapping.items():
+        if rid == related_id:
+            return label
+    return "紐付けなし"
+
+
 def render_consultation_cards():
-    st.subheader("Ver2.0｜カード整理")
-    st.caption("相談者の言葉を、猫・住まい・家族・健康・お金・制度・支援者などのカードとして並べます。答えを出すためではなく、何に悩んでいるかを見える化する画面です。")
+    st.subheader("Ver2.1｜カード整理")
+    st.caption("相談者の悩みをカード化し、猫情報カード・空き家カード・家族関係メモなどの基本情報カードへ紐付けます。基本情報は台帳、Ver2.1カードは判断整理です。")
 
     case_id, client_id = get_case_selector("consultation_cards_case")
     if not case_id:
         return
 
     st.markdown("### カード登録")
+    st.info("猫情報カード・空き家カード・家族関係メモは基本情報として先に登録しておくと、この画面で紐付けできます。")
+
     with st.form("consultation_card_create"):
         c1, c2 = st.columns(2)
         with c1:
             card_type = st.selectbox("カード種別", NYANTOMO_CARD_TYPES)
         with c2:
             card_status = st.selectbox("状態", NYANTOMO_CARD_STATUS_OPTIONS)
+
+        related_mapping, related_labels, related_table, base_label = get_related_base_options(card_type, case_id)
+        if related_table:
+            related_select = st.selectbox(f"紐付ける基本情報（{base_label}）", related_labels)
+        else:
+            related_select = "紐付けなし"
+            st.caption("このカード種別は、現時点では基本情報カードとの直接紐付け対象外です。")
 
         concern = st.text_area("気になっていること")
         client_words = st.text_area("相談者の言葉（できるだけ原文）")
@@ -1479,13 +1569,16 @@ def render_consultation_cards():
         if not concern.strip() and not client_words.strip():
             st.error("「気になっていること」または「相談者の言葉」を入力してください。")
         else:
+            related_id, related_label = related_mapping.get(related_select, ("", ""))
             card_id = make_id("card")
             execute("""
                 INSERT INTO consultation_cards
                 (card_id, case_id, client_id, created_at, updated_at, updated_by, card_type, card_status,
+                 related_table, related_id, related_label,
                  concern, client_words, current_state, unknown_items, related_people_places, next_check_items, memo)
                 VALUES
                 (%(card_id)s, %(case_id)s, %(client_id)s, %(created_at)s, %(updated_at)s, %(updated_by)s, %(card_type)s, %(card_status)s,
+                 %(related_table)s, %(related_id)s, %(related_label)s,
                  %(concern)s, %(client_words)s, %(current_state)s, %(unknown_items)s, %(related_people_places)s, %(next_check_items)s, %(memo)s)
             """, {
                 "card_id": card_id,
@@ -1496,6 +1589,9 @@ def render_consultation_cards():
                 "updated_by": st.session_state.get("login_id", ""),
                 "card_type": card_type,
                 "card_status": card_status,
+                "related_table": related_table if related_id else "",
+                "related_id": related_id,
+                "related_label": related_label,
                 "concern": concern,
                 "client_words": client_words,
                 "current_state": current_state,
@@ -1505,15 +1601,16 @@ def render_consultation_cards():
                 "memo": memo,
             })
             execute("UPDATE cases SET updated_at=%(updated_at)s WHERE case_id=%(case_id)s", {"updated_at": now_text(), "case_id": case_id})
-            log_action("create", "consultation_cards", card_id, "Ver2.0カード登録")
+            log_action("create", "consultation_cards", card_id, "Ver2.1カード登録")
             st.success("カードを登録しました。")
             st.rerun()
 
     st.markdown("---")
     st.markdown("### 登録済みカード")
     df = fetch_df("""
-        SELECT card_id, card_type, card_status, concern, client_words, current_state,
-               unknown_items, related_people_places, next_check_items, memo, updated_at
+        SELECT card_id, card_type, card_status, related_table, related_id, related_label,
+               concern, client_words, current_state, unknown_items,
+               related_people_places, next_check_items, memo, updated_at
         FROM consultation_cards
         WHERE case_id=%(case_id)s
         ORDER BY
@@ -1527,9 +1624,13 @@ def render_consultation_cards():
             updated_at DESC NULLS LAST,
             created_at DESC
     """, {"case_id": case_id})
-    st.dataframe(df, use_container_width=True, hide_index=True)
 
-    if not df.empty:
+    show_cols = ["card_id", "card_type", "card_status", "related_label", "concern", "client_words", "current_state", "unknown_items", "next_check_items", "updated_at"]
+    if df.empty:
+        st.info("カードはまだ登録されていません。")
+    else:
+        st.dataframe(df[show_cols], use_container_width=True, hide_index=True)
+
         st.markdown("### カード状態の俯瞰")
         view = df.groupby(["card_type", "card_status"], dropna=False).size().reset_index(name="件数")
         st.dataframe(view, use_container_width=True, hide_index=True)
@@ -1545,6 +1646,18 @@ def render_consultation_cards():
             with e2:
                 new_card_status = st.selectbox("状態", NYANTOMO_CARD_STATUS_OPTIONS, index=NYANTOMO_CARD_STATUS_OPTIONS.index(row["card_status"]) if row["card_status"] in NYANTOMO_CARD_STATUS_OPTIONS else 0)
 
+            edit_mapping, edit_labels, edit_related_table, edit_base_label = get_related_base_options(new_card_type, case_id)
+            edit_default_label = find_related_label(edit_labels, edit_mapping, row.get("related_id", ""))
+            if edit_related_table:
+                new_related_select = st.selectbox(
+                    f"紐付ける基本情報（{edit_base_label}）",
+                    edit_labels,
+                    index=edit_labels.index(edit_default_label) if edit_default_label in edit_labels else 0
+                )
+            else:
+                new_related_select = "紐付けなし"
+                st.caption("このカード種別は、現時点では基本情報カードとの直接紐付け対象外です。")
+
             new_concern = st.text_area("気になっていること", normalize_text(row["concern"]))
             new_client_words = st.text_area("相談者の言葉（できるだけ原文）", normalize_text(row["client_words"]))
             new_current_state = st.text_area("現在の状態", normalize_text(row["current_state"]))
@@ -1559,9 +1672,11 @@ def render_consultation_cards():
             delete = c2.form_submit_button("削除する")
 
         if update:
+            new_related_id, new_related_label = edit_mapping.get(new_related_select, ("", ""))
             execute("""
                 UPDATE consultation_cards
                 SET updated_at=%(updated_at)s, updated_by=%(updated_by)s, card_type=%(card_type)s, card_status=%(card_status)s,
+                    related_table=%(related_table)s, related_id=%(related_id)s, related_label=%(related_label)s,
                     concern=%(concern)s, client_words=%(client_words)s, current_state=%(current_state)s, unknown_items=%(unknown_items)s,
                     related_people_places=%(related_people_places)s, next_check_items=%(next_check_items)s, memo=%(memo)s
                 WHERE card_id=%(card_id)s
@@ -1570,6 +1685,9 @@ def render_consultation_cards():
                 "updated_by": st.session_state.get("login_id", ""),
                 "card_type": new_card_type,
                 "card_status": new_card_status,
+                "related_table": edit_related_table if new_related_id else "",
+                "related_id": new_related_id,
+                "related_label": new_related_label,
                 "concern": new_concern,
                 "client_words": new_client_words,
                 "current_state": new_current_state,
@@ -1579,7 +1697,7 @@ def render_consultation_cards():
                 "memo": new_memo,
                 "card_id": selected,
             })
-            log_action("update", "consultation_cards", selected, "Ver2.0カード更新")
+            log_action("update", "consultation_cards", selected, "Ver2.1カード更新")
             st.success("カードを更新しました。")
             st.rerun()
 
@@ -1588,7 +1706,7 @@ def render_consultation_cards():
                 st.error("削除するには確認チェックを入れ、DELETE と入力してください。")
             else:
                 execute("DELETE FROM consultation_cards WHERE card_id=%(card_id)s", {"card_id": selected})
-                log_action("delete", "consultation_cards", selected, "Ver2.0カード削除")
+                log_action("delete", "consultation_cards", selected, "Ver2.1カード削除")
                 st.success("カードを削除しました。")
                 st.rerun()
 
@@ -1789,7 +1907,7 @@ def render_nyantomo_card_tile(icon, title, headline, status, detail="", footer="
 
 
 def render_card_os_overview():
-    st.subheader("Ver2.0｜判断の時間を守るカード整理OS")
+    st.subheader("Ver2.1｜判断の時間を守るカード整理OS")
     st.caption("相談者の悩みを、件数表ではなく“見えるカード”として並べる画面です。何を急がず、何を次に確認するかを一目で確認します。")
 
     st.markdown("""
@@ -1859,7 +1977,8 @@ def render_card_os_overview():
         return
 
     card_df = fetch_df("""
-        SELECT card_id, card_type, card_status, concern, client_words, current_state,
+        SELECT card_id, card_type, card_status, related_table, related_id, related_label,
+               concern, client_words, current_state,
                unknown_items, related_people_places, next_check_items, memo, updated_at
         FROM consultation_cards
         WHERE case_id=%(case_id)s
@@ -1931,13 +2050,17 @@ def render_card_os_overview():
             for i, (_, row) in enumerate(group.iterrows()):
                 icon = ny_card_status_icon(row.get("card_status", ""))
                 headline = ny_pick_summary(row.get("concern", ""), row.get("current_state", ""), row.get("client_words", ""))
-                detail = ""
+                detail_parts = []
+                related_label = normalize_text(row.get("related_label", ""))
                 next_check = normalize_text(row.get("next_check_items", ""))
                 unknown = normalize_text(row.get("unknown_items", ""))
+                if related_label:
+                    detail_parts.append(f"基本情報：{related_label}")
                 if next_check:
-                    detail = f"次回確認：{next_check}"
+                    detail_parts.append(f"次回確認：{next_check}")
                 elif unknown:
-                    detail = f"未確認：{unknown}"
+                    detail_parts.append(f"未確認：{unknown}")
+                detail = "／".join(detail_parts)
                 footer = f"更新：{normalize_text(row.get('updated_at', ''))}"
                 with cols[i % 2]:
                     render_nyantomo_card_tile(icon, card_type.replace("カード", ""), headline, row.get("card_status", ""), detail, footer)
