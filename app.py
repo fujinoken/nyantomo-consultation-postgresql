@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import os
 import json
+import html
 from datetime import date, datetime
 from io import BytesIO
 import zipfile
@@ -1727,62 +1728,263 @@ def render_pending_items():
                 st.rerun()
 
 
+def ny_card_status_icon(status):
+    """カード状態を視覚的に示すアイコンへ変換する。"""
+    status = normalize_text(status)
+    if status == "気になる":
+        return "🟥"
+    if status in ["検討中", "保留"]:
+        return "🟨"
+    if status == "整理済":
+        return "🟩"
+    return "⬜"
+
+
+def ny_pending_status_icon(status):
+    """保留事項の状態を視覚的に示すアイコンへ変換する。"""
+    status = normalize_text(status)
+    if status in ["家族確認待ち", "専門家確認待ち"]:
+        return "🟧"
+    if status in ["保留中", "次回確認"]:
+        return "🟨"
+    if status in ["整理済", "終了"]:
+        return "🟩"
+    return "⬜"
+
+
+def ny_pick_summary(*values, max_len=36):
+    """俯瞰カードに出す短い見出しを作る。"""
+    for value in values:
+        text_value = normalize_text(value)
+        if text_value:
+            text_value = " ".join(text_value.split())
+            if len(text_value) > max_len:
+                return text_value[:max_len] + "…"
+            return text_value
+    return "未入力"
+
+
+def ny_html(value):
+    return html.escape(normalize_text(value)).replace("\n", "<br>")
+
+
+def render_nyantomo_card_tile(icon, title, headline, status, detail="", footer=""):
+    """カードOS俯瞰用の小カードを表示する。"""
+    title = ny_html(title)
+    headline = ny_html(headline)
+    status = ny_html(status)
+    detail = ny_html(detail)
+    footer = ny_html(footer)
+    detail_html = f'<div class="ny-os-detail">{detail}</div>' if detail else ''
+    footer_html = f'<div class="ny-os-footer">{footer}</div>' if footer else ''
+    st.markdown(f"""
+    <div class="ny-os-card">
+        <div class="ny-os-title"><span class="ny-os-icon">{icon}</span> {title}</div>
+        <div class="ny-os-headline">{headline}</div>
+        <div class="ny-os-status">{status}</div>
+        {detail_html}
+        {footer_html}
+    </div>
+    """, unsafe_allow_html=True)
+
+
 def render_card_os_overview():
     st.subheader("Ver2.0｜判断の時間を守るカード整理OS")
-    st.caption("カード整理・保留事項・AI要約を横断して、相談者が安心して迷える状態を確認する画面です。")
+    st.caption("相談者の悩みを、件数表ではなく“見えるカード”として並べる画面です。何を急がず、何を次に確認するかを一目で確認します。")
+
+    st.markdown("""
+    <style>
+    .ny-os-card {
+        background: #ffffff;
+        border: 1px solid #e8edf5;
+        border-radius: 18px;
+        padding: 16px 17px;
+        margin-bottom: 12px;
+        box-shadow: 0 7px 18px rgba(30, 41, 59, 0.06);
+        min-height: 145px;
+    }
+    .ny-os-title {
+        font-weight: 800;
+        color: #172033;
+        font-size: 1.04rem;
+        margin-bottom: 8px;
+    }
+    .ny-os-icon {
+        font-size: 1.12rem;
+        margin-right: 2px;
+    }
+    .ny-os-headline {
+        font-size: 1.02rem;
+        font-weight: 700;
+        color: #334155;
+        line-height: 1.45;
+        margin-bottom: 8px;
+    }
+    .ny-os-status {
+        display: inline-block;
+        padding: 3px 9px;
+        border-radius: 999px;
+        background: #f8fafc;
+        border: 1px solid #e2e8f0;
+        color: #475569;
+        font-size: 0.86rem;
+        font-weight: 700;
+        margin-bottom: 8px;
+    }
+    .ny-os-detail {
+        color: #64748b;
+        font-size: 0.9rem;
+        line-height: 1.45;
+        margin-top: 6px;
+    }
+    .ny-os-footer {
+        color: #94a3b8;
+        font-size: 0.8rem;
+        margin-top: 10px;
+    }
+    .ny-os-note {
+        background: linear-gradient(135deg, #fffaf0 0%, #ffffff 80%);
+        border: 1px solid #f4ddb3;
+        border-radius: 18px;
+        padding: 16px 18px;
+        margin: 8px 0 16px;
+        color: #475569;
+        line-height: 1.55;
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
     case_id, client_id = get_case_selector("card_os_overview_case")
     if not case_id:
         return
 
     card_df = fetch_df("""
-        SELECT card_type, card_status, concern, client_words, next_check_items, updated_at
+        SELECT card_id, card_type, card_status, concern, client_words, current_state,
+               unknown_items, related_people_places, next_check_items, memo, updated_at
         FROM consultation_cards
         WHERE case_id=%(case_id)s
-        ORDER BY updated_at DESC NULLS LAST, created_at DESC
+        ORDER BY
+            CASE card_status
+                WHEN '気になる' THEN 1
+                WHEN '検討中' THEN 2
+                WHEN '保留' THEN 3
+                WHEN '整理済' THEN 4
+                ELSE 9
+            END,
+            updated_at DESC NULLS LAST,
+            created_at DESC
     """, {"case_id": case_id})
+
     pending_df = fetch_df("""
-        SELECT theme, status, next_check_date, reason, caution, updated_at
+        SELECT pending_id, theme, status, next_check_date, reason, caution, related_people, memo, updated_at
         FROM pending_items
         WHERE case_id=%(case_id)s
-        ORDER BY next_check_date ASC NULLS LAST, updated_at DESC NULLS LAST
+        ORDER BY
+            CASE status
+                WHEN '家族確認待ち' THEN 1
+                WHEN '専門家確認待ち' THEN 2
+                WHEN '次回確認' THEN 3
+                WHEN '保留中' THEN 4
+                WHEN '整理済' THEN 5
+                WHEN '終了' THEN 6
+                ELSE 9
+            END,
+            next_check_date ASC NULLS LAST,
+            updated_at DESC NULLS LAST
     """, {"case_id": case_id})
+
     summary_df = fetch_df("""
         SELECT created_at, summary_type, summary_text
         FROM ai_summaries
         WHERE case_id=%(case_id)s
         ORDER BY created_at DESC
-        LIMIT 5
+        LIMIT 3
     """, {"case_id": case_id})
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("カード数", len(card_df))
-    c2.metric("保留事項", len(pending_df))
-    c3.metric("AI要約", len(summary_df))
+    urgent_cards = 0 if card_df.empty else len(card_df[card_df["card_status"].astype(str).isin(["気になる", "検討中"])])
+    active_pending = 0 if pending_df.empty else len(pending_df[~pending_df["status"].astype(str).isin(["整理済", "終了"])])
+    waiting_count = 0 if pending_df.empty else len(pending_df[pending_df["status"].astype(str).isin(["家族確認待ち", "専門家確認待ち", "次回確認"])])
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("見えているカード", len(card_df))
+    c2.metric("要整理カード", urgent_cards)
+    c3.metric("保留中の事項", active_pending)
+    c4.metric("確認待ち", waiting_count)
+
+    st.markdown("""
+    <div class="ny-os-note">
+    🐾 この画面は、相談者の悩みを“処理する案件”ではなく、机の上に並べたカードとして眺めるための画面です。<br>
+    🟥 気になる　🟧 確認待ち　🟨 検討・保留　🟩 整理済 の目安で確認します。
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown("### いま見えているカード")
+    if card_df.empty:
+        st.info("カードはまだ登録されていません。『Ver2.0｜カード整理』から登録してください。")
+    else:
+        for card_type in NYANTOMO_CARD_TYPES:
+            group = card_df[card_df["card_type"] == card_type]
+            if group.empty:
+                continue
+            st.markdown(f"#### {card_type}")
+            cols = st.columns(2)
+            for i, (_, row) in enumerate(group.iterrows()):
+                icon = ny_card_status_icon(row.get("card_status", ""))
+                headline = ny_pick_summary(row.get("concern", ""), row.get("current_state", ""), row.get("client_words", ""))
+                detail = ""
+                next_check = normalize_text(row.get("next_check_items", ""))
+                unknown = normalize_text(row.get("unknown_items", ""))
+                if next_check:
+                    detail = f"次回確認：{next_check}"
+                elif unknown:
+                    detail = f"未確認：{unknown}"
+                footer = f"更新：{normalize_text(row.get('updated_at', ''))}"
+                with cols[i % 2]:
+                    render_nyantomo_card_tile(icon, card_type.replace("カード", ""), headline, row.get("card_status", ""), detail, footer)
 
     st.markdown("---")
-    left, right = st.columns(2)
-    with left:
-        st.markdown("### カード整理")
-        if card_df.empty:
-            st.info("カードはまだ登録されていません。")
-        else:
-            st.dataframe(card_df, use_container_width=True, hide_index=True, height=300)
+    st.markdown("### 保留事項カード")
+    if pending_df.empty:
+        st.info("保留事項はまだ登録されていません。『Ver2.0｜保留事項管理』から登録してください。")
+    else:
+        cols = st.columns(2)
+        for i, (_, row) in enumerate(pending_df.iterrows()):
+            icon = ny_pending_status_icon(row.get("status", ""))
+            headline = ny_pick_summary(row.get("theme", ""), row.get("reason", ""))
+            detail_parts = []
+            if normalize_text(row.get("next_check_date", "")):
+                detail_parts.append(f"次回確認日：{normalize_text(row.get('next_check_date', ''))}")
+            if normalize_text(row.get("related_people", "")):
+                detail_parts.append(f"関係者：{normalize_text(row.get('related_people', ''))}")
+            if normalize_text(row.get("caution", "")):
+                detail_parts.append(f"注意：{normalize_text(row.get('caution', ''))}")
+            detail = "／".join(detail_parts)
+            footer = f"更新：{normalize_text(row.get('updated_at', ''))}"
+            with cols[i % 2]:
+                render_nyantomo_card_tile(icon, "保留事項", headline, row.get("status", ""), detail, footer)
 
-    with right:
-        st.markdown("### 保留事項")
-        if pending_df.empty:
-            st.info("保留事項はまだ登録されていません。")
+    st.markdown("---")
+    with st.expander("表形式で確認する", expanded=False):
+        st.markdown("#### カード整理データ")
+        if card_df.empty:
+            st.info("カードはありません。")
         else:
-            st.dataframe(pending_df, use_container_width=True, hide_index=True, height=300)
+            st.dataframe(card_df, use_container_width=True, hide_index=True, height=260)
+
+        st.markdown("#### 保留事項データ")
+        if pending_df.empty:
+            st.info("保留事項はありません。")
+        else:
+            st.dataframe(pending_df, use_container_width=True, hide_index=True, height=260)
 
     st.markdown("---")
     st.markdown("### 最近のAI要約")
     if summary_df.empty:
         st.info("AI要約はまだ保存されていません。")
     else:
-        st.dataframe(summary_df, use_container_width=True, hide_index=True)
-
+        for _, row in summary_df.iterrows():
+            with st.expander(f"{row.get('created_at', '')}｜{row.get('summary_type', '')}", expanded=False):
+                st.write(row.get("summary_text", ""))
 
 
 def render_ai_summary():
