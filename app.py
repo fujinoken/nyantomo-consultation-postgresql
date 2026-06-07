@@ -2845,6 +2845,193 @@ def build_guardian_ai_prompt(support_type, source_text):
 """.strip()
 
 
+
+
+def build_guardian_card_ai_prompt(summary_type, source_text):
+    """後見モード用：カード整理AIプロンプト。
+    後見カード・面談記録・リソース地図を、本人中心のカード配置として整理する。
+    """
+    return f"""
+あなたは『にゃんとも 住まいと猫の相談室』の後見モード用「カード整理AI」です。
+役割は、後見記録を一般的に要約することではありません。
+本人希望カード、家族カード、医療カード、介護カード、財産カード、住まいカード、ペットカード、支援者カード、判断保留カード、家庭裁判所対応カード、面談記録、リソース地図を読み取り、
+「いま机の上に並んでいる後見カード」を見える化してください。
+
+最重要ルール：
+- 後見人・行政書士の判断を代行しない
+- 法的判断、医療判断、財産処分、不動産処分、税務判断を断定しない
+- 本人の意思を決めつけない
+- 家族・支援者の善悪を決めつけない
+- 支援を増やすことを当然の結論にしない
+- 後見人が抱え込む方向へ誘導しない
+- 家庭裁判所提出用の断定文ではなく、内部整理メモとして書く
+- 事実、未確認、保留、次回確認を分ける
+- 「本人の生活の安定」と「後見人が抱え込まない境界線」を両方守る
+
+出力形式は必ず以下の見出しで作成してください。
+
+## 1. 今回見えているテーマ
+- 例：本人希望
+- 例：家族との温度差
+- 例：医療・介護連携
+- 例：財産管理
+- 例：住まい・施設
+- 例：ペットの将来
+- 例：家庭裁判所報告
+
+## 2. いま机の上に並んでいる後見カード
+カードごとに、次の形で整理してください。
+- 🐾 カード種別：
+- 現在見えていること：
+- 本人の言葉・希望：
+- 家族・支援者の関係：
+- 未確認事項：
+- 次回確認：
+
+## 3. 今すぐ決めなくてよいこと
+- 例：施設移動の最終判断
+- 例：財産処分の方向性
+- 例：家族との関係整理の結論
+- 例：ペットの最終的な引き取り先
+※ただし、緊急性がある可能性があるものは「保留ではなく確認が必要」と表現してください。
+
+## 4. 少し整理した方がよいこと
+- 例：本人の希望の原文
+- 例：医療・介護の連絡先
+- 例：家族の温度感
+- 例：収支・定期支払
+- 例：住まい・施設の安全面
+- 例：家庭裁判所報告に必要な事実
+
+## 5. 次回確認
+次回の面談・連絡・記録確認で確認するとよいことを3〜7個に絞ってください。
+
+## 6. つなぐ可能性がある専門職・支援者
+- 主治医、ケアマネ、施設担当者、包括、社協、弁護士、司法書士、税理士、動物病院、親族など
+- 「必要」と断定せず、「可能性」として整理してください。
+
+## 7. 後見人として関われる範囲
+- 記録、連絡調整、本人意思の確認、財産管理の事実整理、家庭裁判所報告準備など
+- 断定や抱え込みではなく、確認・整理・報告・連携の範囲で書いてください。
+
+## 8. 後見人が抱え込まない方がよい範囲
+- 医療判断、法的紛争、税務判断、感情調整の抱え込み、家族間対立の仲裁、緊急対応の常時化など
+- 必要に応じて他専門職・関係機関へつなぐ可能性として書いてください。
+
+## 9. 家庭裁判所報告に向けた内部メモ
+家庭裁判所にそのまま出す文章ではなく、後日報告書を作るための内部整理として、3〜6行でまとめてください。
+
+## 10. 内部メモ用の短い要約
+今回の後見カード全体の見取り図を3〜5行でまとめてください。
+
+整理種別：{summary_type}
+
+以下の後見記録をカード整理してください。
+---
+{source_text}
+""".strip()
+
+
+def render_guardian_card_ai():
+    st.subheader("後見｜カード整理AI")
+    st.caption("後見カード・面談記録・リソース地図を、本人中心のカード配置として整理します。AIは判断係ではなく、記録の整理係です。")
+
+    ward_map, ward_labels = get_guardian_ward_options()
+    if not ward_labels:
+        st.warning("先に被後見人を登録してください。")
+        return
+
+    selected_label = st.selectbox("対象被後見人", ward_labels, key="guardian_card_ai_ward")
+    ward_id = ward_map[selected_label]
+
+    summary_type = st.selectbox(
+        "整理種別",
+        ["後見カード整理", "本人希望整理", "家族・支援者整理", "医療・介護整理", "財産・住まい整理", "ペット・生活整理", "家庭裁判所報告前整理", "その他"],
+        key="guardian_card_ai_type"
+    )
+
+    source_text = build_guardian_ai_source(ward_id)
+
+    with st.expander("AIに渡す元データを確認", expanded=False):
+        st.text_area("元データ", source_text, height=320, key="guardian_card_ai_source")
+
+    extra_instruction = st.text_area(
+        "追加指示（任意）",
+        placeholder="例：家庭裁判所提出前ではなく、内部用に短めに整理してください。",
+        key="guardian_card_ai_extra"
+    )
+
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        run_ai = st.button("後見カード整理AIを作成して保存", disabled=not can_write(), key="guardian_card_ai_run")
+    with col2:
+        st.caption(f"使用モデル：{get_openai_model()} / APIキー：{'設定あり' if get_openai_api_key() else '未設定'}")
+
+    if run_ai:
+        if not source_text.strip():
+            st.error("整理対象のデータがありません。")
+        else:
+            try:
+                prompt = build_guardian_card_ai_prompt(summary_type, source_text)
+                if extra_instruction.strip():
+                    prompt += f"\n\n追加指示：{extra_instruction.strip()}"
+                with st.spinner("後見カード整理AIを作成しています..."):
+                    result_text, model = call_openai_summary(prompt)
+                ai_id = make_id("gai")
+                execute("""
+                    INSERT INTO guardian_ai_support
+                    (ai_id, ward_id, created_at, updated_by, support_type, source_text, result_text, model, memo)
+                    VALUES (%(ai_id)s, %(ward_id)s, %(created_at)s, %(updated_by)s, %(support_type)s, %(source_text)s, %(result_text)s, %(model)s, %(memo)s)
+                """, {
+                    "ai_id": ai_id,
+                    "ward_id": ward_id,
+                    "created_at": now_text(),
+                    "updated_by": st.session_state.get("login_id", ""),
+                    "support_type": f"カード整理AI｜{summary_type}",
+                    "source_text": source_text,
+                    "result_text": result_text,
+                    "model": model,
+                    "memo": extra_instruction,
+                })
+                log_action("create", "guardian_ai_support", ai_id, f"後見カード整理AI:{summary_type}")
+                st.success("後見カード整理AIを保存しました。")
+                st.rerun()
+            except Exception as e:
+                st.error("後見カード整理AIの作成に失敗しました。")
+                st.exception(e)
+
+    st.markdown("---")
+    st.markdown("### 保存済み 後見カード整理AI")
+    df = fetch_df("""
+        SELECT ai_id, created_at, support_type, result_text, model, memo
+        FROM guardian_ai_support
+        WHERE ward_id=%(ward_id)s
+          AND support_type LIKE 'カード整理AI%%'
+        ORDER BY created_at DESC
+    """, {"ward_id": ward_id})
+
+    if df.empty:
+        st.info("保存済みの後見カード整理AIはありません。")
+    else:
+        for _, r in df.iterrows():
+            title = f"{r.get('created_at','')}｜{r.get('support_type','')}"
+            with st.expander(title, expanded=False):
+                st.markdown(normalize_text(r.get("result_text", "")))
+                st.caption(f"model: {normalize_text(r.get('model',''))} / memo: {normalize_text(r.get('memo',''))}")
+
+        if can_write():
+            selected = st.selectbox("削除するAI整理ID", df["ai_id"].tolist(), key="guardian_card_ai_delete_select")
+            delete_confirm = st.checkbox("この後見カード整理AIを削除することを確認しました。", key="guardian_card_ai_delete_confirm")
+            if st.button("選択した後見カード整理AIを削除", key="guardian_card_ai_delete_button"):
+                if not delete_confirm:
+                    st.error("削除するには確認チェックを入れてください。")
+                else:
+                    execute("DELETE FROM guardian_ai_support WHERE ai_id=%(ai_id)s", {"ai_id": selected})
+                    log_action("delete", "guardian_ai_support", selected, "後見カード整理AI削除")
+                    st.success("削除しました。")
+                    st.rerun()
+
+
 def render_guardian_ai_support():
     st.subheader("後見AI支援")
     st.caption("AIは判断係ではなく、本人を支える関係性を整理する補助係です。")
@@ -3087,6 +3274,7 @@ GUARDIAN_MENUS = [
     "後見｜家庭裁判所対応カード",
     "後見｜リソース地図",
     "後見｜面談記録",
+    "後見｜カード整理AI",
     "後見｜AI支援",
     "後見｜データ確認",
 ]
@@ -3189,6 +3377,8 @@ elif menu == "後見｜リソース地図":
     render_guardian_resource_map()
 elif menu == "後見｜面談記録":
     render_guardian_interviews()
+elif menu == "後見｜カード整理AI":
+    render_guardian_card_ai()
 elif menu == "後見｜AI支援":
     render_guardian_ai_support()
 elif menu == "後見｜データ確認":
