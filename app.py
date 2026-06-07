@@ -952,6 +952,32 @@ def ensure_extension_tables():
         pass
 
 
+
+    # PostgreSQLでは、過去の失敗したCREATE TABLE等で
+    # テーブル本体は無いのに同名の型だけが残ることがあります。
+    # その状態で CREATE TABLE IF NOT EXISTS を実行すると
+    # duplicate key value violates unique constraint "pg_type_typname_nsp_index"
+    # が出るため、テーブルが無く型だけ残っている場合のみ型を掃除します。
+    for _table_name in ["consultation_cards", "pending_items"]:
+        try:
+            execute(f"""
+                DO $$
+                BEGIN
+                    IF to_regclass('public.{_table_name}') IS NULL
+                       AND EXISTS (
+                           SELECT 1
+                           FROM pg_type t
+                           JOIN pg_namespace n ON n.oid = t.typnamespace
+                           WHERE t.typname = '{_table_name}'
+                             AND n.nspname = 'public'
+                       ) THEN
+                        EXECUTE 'DROP TYPE public.{_table_name} CASCADE';
+                    END IF;
+                END $$;
+            """)
+        except Exception:
+            pass
+
     # ========================================================
     # にゃんとも相談管理 Ver2.0：カード整理OS 追加テーブル
     # ========================================================
