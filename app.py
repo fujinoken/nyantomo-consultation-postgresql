@@ -1561,8 +1561,34 @@ def _shorten_report_lines(text, max_lines=6, max_chars=260):
     return joined
 
 
+def _build_report_one_liner(theme, organize, next_check, not_decide, pending):
+    """Ver2.6：相談者向けPDF上部に出す「今回のひとこと」を作る。"""
+    theme_lines = _shorten_report_lines(theme, max_lines=3, max_chars=180).splitlines()
+    org_lines = _shorten_report_lines(organize or next_check, max_lines=3, max_chars=180).splitlines()
+    nd_lines = _shorten_report_lines(not_decide or pending, max_lines=3, max_chars=180).splitlines()
+
+    def clean_first(lines):
+        for line in lines:
+            value = normalize_text(line).lstrip("-・○●*□ ")
+            if value and value != "未整理":
+                return value
+        return ""
+
+    main_theme = clean_first(theme_lines)
+    action_theme = clean_first(org_lines)
+    hold_theme = clean_first(nd_lines)
+
+    if action_theme and main_theme and action_theme != main_theme:
+        return f"今は「{main_theme}」を急いで決めるより、「{action_theme}」を少し整理する段階に見えます。"
+    if main_theme and hold_theme:
+        return f"今は「{main_theme}」について、結論を急がず「{hold_theme}」として置いておける部分があります。"
+    if main_theme:
+        return f"今は「{main_theme}」について、急いで結論を出すより、見えていることを一緒に整理する段階です。"
+    return "今は急いで結論を出すより、見えていることを一緒に整理する段階です。"
+
+
 def build_client_report_pdf_bytes(case_id, summary_row):
-    """カード整理AIの結果から、相談者向けA4一枚PDFを生成する。"""
+    """カード整理AIの結果から、相談者向けA4一枚PDFを生成する。Ver2.6/2.7対応。"""
     try:
         from reportlab.pdfgen import canvas
         from reportlab.lib.pagesizes import A4
@@ -1586,6 +1612,7 @@ def build_client_report_pdf_bytes(case_id, summary_row):
     not_decide = _extract_markdown_section(summary_text, ["今すぐ決めなくてよいこと", "今決めなくてよいこと"])
     organize = _extract_markdown_section(summary_text, ["少し整理した方がよいこと"])
     next_check = _extract_markdown_section(summary_text, ["次回確認"])
+    pending = _extract_markdown_section(summary_text, ["保留していること", "保留事項", "今は保留すること"])
 
     if not theme:
         theme = summary_text[:220]
@@ -1596,6 +1623,10 @@ def build_client_report_pdf_bytes(case_id, summary_row):
         homework += ("\n" if homework else "") + next_check
     if not homework:
         homework = "- 次回の相談で一緒に確認します。"
+    if not pending:
+        pending = not_decide or "- 今回は、無理に結論を出さず次回も確認します。"
+
+    one_liner = _build_report_one_liner(theme, organize, next_check, not_decide, pending)
 
     title = "にゃんとも相談整理レポート"
     subtitle = "急いで結論を出すためではなく、いま見えていることを一緒に眺めるためのメモです。"
@@ -1603,8 +1634,8 @@ def build_client_report_pdf_bytes(case_id, summary_row):
     buffer = BytesIO()
     c = canvas.Canvas(buffer, pagesize=A4)
     width, height = A4
-    margin_x = 18 * mm
-    y = height - 18 * mm
+    margin_x = 16 * mm
+    y = height - 17 * mm
 
     def wrap_text(value, font_name="HeiseiMin-W3", font_size=10, max_width=165*mm):
         text_value = normalize_text(value)
@@ -1627,48 +1658,118 @@ def build_client_report_pdf_bytes(case_id, summary_row):
                 result.append(current)
         return result
 
-    def draw_text_block(heading, body, max_lines=7):
-        nonlocal y
-        c.setFont("HeiseiKakuGo-W5", 12)
-        c.drawString(margin_x, y, heading)
-        y -= 7 * mm
-        c.setFont("HeiseiMin-W3", 10)
-        lines = wrap_text(_shorten_report_lines(body, max_lines=max_lines), "HeiseiMin-W3", 10, width - margin_x*2)
+    def draw_wrapped(x, y0, body, font_name="HeiseiMin-W3", font_size=9, max_width=160*mm, max_lines=5, line_gap=4.6*mm):
+        c.setFont(font_name, font_size)
+        lines = wrap_text(body, font_name, font_size, max_width)
+        used = 0
         for line in lines[:max_lines]:
-            c.drawString(margin_x + 4*mm, y, line)
-            y -= 5.3 * mm
-        y -= 3 * mm
+            c.drawString(x, y0, line)
+            y0 -= line_gap
+            used += 1
+        return y0, used
+
+    def draw_text_block(heading, body, max_lines=5):
+        nonlocal y
+        c.setFont("HeiseiKakuGo-W5", 11.5)
+        c.drawString(margin_x, y, heading)
+        y -= 5.8 * mm
+        lines = wrap_text(_shorten_report_lines(body, max_lines=max_lines, max_chars=260), "HeiseiMin-W3", 9.2, width - margin_x*2)
+        c.setFont("HeiseiMin-W3", 9.2)
+        for line in lines[:max_lines]:
+            c.drawString(margin_x + 3*mm, y, line)
+            y -= 4.8 * mm
+        y -= 2.3 * mm
+
+    def draw_one_liner_box():
+        nonlocal y
+        box_h = 21 * mm
+        c.setLineWidth(0.5)
+        c.roundRect(margin_x, y-box_h, width - margin_x*2, box_h, 3.5*mm, stroke=1, fill=0)
+        c.setFont("HeiseiKakuGo-W5", 10.5)
+        c.drawString(margin_x + 4*mm, y - 6*mm, "今回のひとこと")
+        draw_wrapped(
+            margin_x + 4*mm,
+            y - 12.5*mm,
+            one_liner,
+            "HeiseiMin-W3",
+            9.3,
+            width - margin_x*2 - 8*mm,
+            max_lines=2,
+            line_gap=4.3*mm,
+        )
+        y -= box_h + 7*mm
+
+    def draw_four_frame_checklist():
+        nonlocal y
+        c.setFont("HeiseiKakuGo-W5", 11.5)
+        c.drawString(margin_x, y, "4つの整理枠")
+        y -= 6 * mm
+
+        col_gap = 5 * mm
+        row_gap = 5 * mm
+        box_w = (width - margin_x*2 - col_gap) / 2
+        box_h = 30 * mm
+        left_x = margin_x
+        right_x = margin_x + box_w + col_gap
+
+        frames = [
+            ("□ 今回見えていること", theme, left_x, y),
+            ("□ 今決めなくてよいこと", not_decide or "- 次回も一緒に確認します。", right_x, y),
+            ("□ 次回までの宿題", homework, left_x, y - box_h - row_gap),
+            ("□ 保留していること", pending, right_x, y - box_h - row_gap),
+        ]
+
+        for heading, body, x, top_y in frames:
+            c.roundRect(x, top_y - box_h, box_w, box_h, 3*mm, stroke=1, fill=0)
+            c.setFont("HeiseiKakuGo-W5", 9.2)
+            c.drawString(x + 3*mm, top_y - 5.2*mm, heading)
+            compact = _shorten_report_lines(body, max_lines=3, max_chars=130)
+            draw_wrapped(
+                x + 3*mm,
+                top_y - 11*mm,
+                compact,
+                "HeiseiMin-W3",
+                7.7,
+                box_w - 6*mm,
+                max_lines=4,
+                line_gap=3.7*mm,
+            )
+        y -= (box_h * 2 + row_gap + 7*mm)
 
     # header
-    c.setFont("HeiseiKakuGo-W5", 18)
+    c.setFont("HeiseiKakuGo-W5", 17)
     c.drawString(margin_x, y, title)
-    y -= 8 * mm
-    c.setFont("HeiseiMin-W3", 9)
+    y -= 7 * mm
+    c.setFont("HeiseiMin-W3", 8.7)
     c.drawString(margin_x, y, subtitle)
-    y -= 8 * mm
+    y -= 7 * mm
 
     # meta box
     c.setLineWidth(0.5)
-    c.roundRect(margin_x, y-20*mm, width - margin_x*2, 18*mm, 4*mm, stroke=1, fill=0)
-    c.setFont("HeiseiMin-W3", 9)
-    c.drawString(margin_x + 4*mm, y - 6*mm, f"相談者：{normalize_text(case.get('client_name', '')) or '未設定'}")
-    c.drawString(margin_x + 4*mm, y - 12*mm, f"案件：{normalize_text(case.get('case_title', '')) or '未設定'}")
-    c.drawString(width/2, y - 6*mm, f"作成日：{today_text()}")
-    c.drawString(width/2, y - 12*mm, f"整理種別：{normalize_text(summary_row.get('summary_type', 'カード整理AI'))}")
-    y -= 28 * mm
+    c.roundRect(margin_x, y-18*mm, width - margin_x*2, 16*mm, 4*mm, stroke=1, fill=0)
+    c.setFont("HeiseiMin-W3", 8.8)
+    c.drawString(margin_x + 4*mm, y - 5.5*mm, f"相談者：{normalize_text(case.get('client_name', '')) or '未設定'}")
+    c.drawString(margin_x + 4*mm, y - 11.5*mm, f"案件：{normalize_text(case.get('case_title', '')) or '未設定'}")
+    c.drawString(width/2, y - 5.5*mm, f"作成日：{today_text()}")
+    c.drawString(width/2, y - 11.5*mm, f"整理種別：{normalize_text(summary_row.get('summary_type', 'カード整理AI'))}")
+    y -= 24 * mm
 
-    draw_text_block("1. 今回見えていること", theme, max_lines=7)
-    draw_text_block("2. 今決めなくてよいこと", not_decide or "- まだ無理に結論を出さなくてよいことを、次回一緒に確認します。", max_lines=6)
-    draw_text_block("3. 次回までの宿題・確認すること", homework, max_lines=8)
+    draw_one_liner_box()
+
+    draw_text_block("1. 今回見えていること", theme, max_lines=4)
+    draw_text_block("2. 今決めなくてよいこと", not_decide or "- まだ無理に結論を出さなくてよいことを、次回一緒に確認します。", max_lines=4)
+    draw_text_block("3. 次回までの宿題・確認すること", homework, max_lines=5)
+
+    draw_four_frame_checklist()
 
     # footer note
-    y = max(y, 28*mm)
-    c.setFont("HeiseiMin-W3", 8)
+    y = max(y, 24*mm)
+    c.setFont("HeiseiMin-W3", 7.6)
     footer = "※このレポートは相談内容の整理メモです。法律・税務・医療・不動産の判断を断定するものではありません。"
-    for line in wrap_text(footer, "HeiseiMin-W3", 8, width - margin_x*2):
+    for line in wrap_text(footer, "HeiseiMin-W3", 7.6, width - margin_x*2):
         c.drawString(margin_x, y, line)
-        y -= 4*mm
-    c.drawString(margin_x, 14*mm, "にゃんとも 住まいと猫の相談室")
+        y -= 3.7*mm
+    c.drawString(margin_x, 13*mm, "にゃんとも 住まいと猫の相談室")
     c.showPage()
     c.save()
     buffer.seek(0)
