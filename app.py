@@ -90,6 +90,81 @@ SUPPORT_CATEGORY_OPTIONS = [
     "その他",
 ]
 
+
+# ============================================================
+# Ver3.3：制度候補整理 設定
+# ------------------------------------------------------------
+# 補助金・制度は自治体ごとに条件、年度予算、受付期間が変わるため、
+# 「使える」と断定せず、確認候補・次回確認事項として整理します。
+# ============================================================
+
+POLICY_CATEGORY_OPTIONS = [
+    "空き家改修補助",
+    "耐震診断・耐震改修補助",
+    "解体補助",
+    "バリアフリー改修補助",
+    "介護保険住宅改修",
+    "住宅セーフティネット関連",
+    "固定資産税・特定空家関連",
+    "その他制度",
+]
+
+POLICY_STATUS_OPTIONS = [
+    "候補",
+    "次回確認",
+    "自治体確認中",
+    "対象外の可能性",
+    "申請準備",
+    "保留",
+    "終了",
+]
+
+POLICY_PRIORITY_OPTIONS = ["低", "中", "高", "要確認"]
+
+POLICY_DISCLAIMER = (
+    "※制度・補助金は自治体ごとに条件、年度予算、受付期間、対象工事、所有者要件が異なります。"
+    "この画面は『使える制度の断定』ではなく、正式確認のための候補整理です。"
+    "最終判断は必ず最新の自治体要綱・窓口確認・専門職確認により行ってください。"
+)
+
+POLICY_CANDIDATE_TEMPLATES = {
+    "空き家改修補助": {
+        "keywords": ["改修", "リフォーム", "修繕", "直したい", "貸したい", "住みたい", "活用"],
+        "check_items": "所在地市区町村／空き家期間／所有者／改修目的／工事内容／見積書／市内業者要件／着工前申請か",
+        "caution": "着工後申請は対象外となる制度が多いため、工事契約・着工前に確認する。",
+    },
+    "耐震診断・耐震改修補助": {
+        "keywords": ["耐震", "昭和", "旧耐震", "1981", "1981年", "地震", "倒壊", "古い家"],
+        "check_items": "建築年／木造か／過去の耐震診断歴／建築確認資料／所有者／居住予定／自治体の診断制度",
+        "caution": "旧耐震の可能性がある場合は、改修や活用判断の前に耐震診断の候補を確認する。",
+    },
+    "解体補助": {
+        "keywords": ["解体", "取り壊し", "老朽", "危険", "倒れそう", "更地", "壊す", "除却"],
+        "check_items": "建物状態／老朽度／近隣への危険／所有者／相続登記状況／見積書／事前調査／固定資産税影響",
+        "caution": "解体後に固定資産税や土地利用の影響が出ることがあるため、急いで決めない。",
+    },
+    "バリアフリー改修補助": {
+        "keywords": ["手すり", "段差", "転倒", "車椅子", "バリアフリー", "玄関", "浴室", "トイレ"],
+        "check_items": "本人の居住予定／要介護認定の有無／改修箇所／ケアマネ関与／住宅改修理由書／見積書",
+        "caution": "介護保険住宅改修と自治体独自補助の併用可否を確認する。",
+    },
+    "介護保険住宅改修": {
+        "keywords": ["要介護", "要支援", "ケアマネ", "介護保険", "住宅改修", "手すり", "段差解消"],
+        "check_items": "要介護・要支援認定／ケアマネ／住宅改修理由書／対象工事／事前申請／支給限度基準額",
+        "caution": "原則として事前申請が必要。行政書士単独で判断せず、ケアマネ・自治体窓口と確認する。",
+    },
+    "住宅セーフティネット関連": {
+        "keywords": ["高齢者", "賃貸", "貸す", "住まい", "住宅確保", "セーフティネット", "見守り", "入居"],
+        "check_items": "賃貸化の意向／住宅確保要配慮者への提供可能性／登録住宅制度／改修必要性／管理体制",
+        "caution": "賃貸化は収益判断・管理責任・入居者支援が絡むため、制度候補として慎重に整理する。",
+    },
+    "固定資産税・特定空家関連": {
+        "keywords": ["固定資産税", "特定空家", "管理不全", "勧告", "指導", "近隣", "苦情", "雑草"],
+        "check_items": "自治体からの通知／現地状態／近隣苦情／草木・破損・越境／管理履歴／写真記録",
+        "caution": "税務判断や行政処分対応は断定せず、通知文書と自治体窓口確認を優先する。",
+    },
+}
+
 # Ver2.1：判断カードと基本情報カードの紐付け
 # 猫情報カード・空き家カード・家族関係メモは「基本情報」、
 # Ver2.xカードは「悩み・判断・保留」を整理する上位カードとして扱います。
@@ -545,7 +620,7 @@ def render_dashboard():
             height=180
         )
 
-    st.markdown('<div class="ny-footer">© にゃんとも相談管理 Ver3.2.6｜安定・安全・効率的な相談業務をサポートします 🐾</div>', unsafe_allow_html=True)
+    st.markdown('<div class="ny-footer">© にゃんとも相談管理 Ver3.3 制度候補整理対応｜安定・安全・効率的な相談業務をサポートします 🐾</div>', unsafe_allow_html=True)
 
 
 
@@ -1057,6 +1132,33 @@ def ensure_extension_tables():
         )
     """)
 
+    # ========================================================
+    # Ver3.3：制度候補整理 追加テーブル
+    # ========================================================
+    execute("""
+        CREATE TABLE IF NOT EXISTS policy_candidates (
+            policy_id TEXT PRIMARY KEY,
+            case_id TEXT REFERENCES cases(case_id) ON DELETE CASCADE,
+            client_id TEXT REFERENCES clients(client_id) ON DELETE CASCADE,
+            created_at TIMESTAMP,
+            updated_at TIMESTAMP,
+            updated_by TEXT,
+            category TEXT,
+            policy_name TEXT,
+            status TEXT,
+            priority TEXT,
+            municipality TEXT,
+            trigger_words TEXT,
+            reason TEXT,
+            check_items TEXT,
+            caution TEXT,
+            next_action TEXT,
+            official_confirmed INTEGER DEFAULT 0,
+            official_url TEXT,
+            memo TEXT
+        )
+    """)
+
 
 
 
@@ -1176,7 +1278,7 @@ def get_backup_tables():
         if table not in seen:
             tables.append((table, label))
             seen.add(table)
-    for table, label in [("nyantomo_backup_logs", "自動バックアップログ"), ("consultation_cards", "相談カード整理"), ("pending_items", "保留事項"), ("guardian_wards", "後見_被後見人"), ("guardian_cards", "後見_カード"), ("guardian_interview_logs", "後見_面談記録"), ("guardian_resource_map", "後見_リソース地図"), ("guardian_ai_support", "後見_AI支援")]:
+    for table, label in [("nyantomo_backup_logs", "自動バックアップログ"), ("consultation_cards", "相談カード整理"), ("pending_items", "保留事項"), ("policy_candidates", "制度候補整理"), ("guardian_wards", "後見_被後見人"), ("guardian_cards", "後見_カード"), ("guardian_interview_logs", "後見_面談記録"), ("guardian_resource_map", "後見_リソース地図"), ("guardian_ai_support", "後見_AI支援")]:
         if table not in seen:
             tables.append((table, label))
     return tables
@@ -1368,6 +1470,7 @@ def build_case_ai_source(case_id):
         ("family", "家族関係メモ", ["name", "relation", "contact_ok", "temperature", "memo"]),
         ("consultation_cards", "Ver2.1カード整理", ["card_type", "card_status", "related_label", "concern", "client_words", "current_state", "unknown_items", "related_people_places", "next_check_items", "memo"]),
         ("pending_items", "Ver2.0保留事項", ["theme", "reason", "deadline_type", "next_check_date", "related_people", "caution", "status", "memo"]),
+        ("policy_candidates", "Ver3.3制度候補整理", ["category", "policy_name", "status", "priority", "municipality", "trigger_words", "reason", "check_items", "caution", "next_action", "official_confirmed", "official_url", "memo"]),
         ("line_messages", "LINEメモ", ["to_target", "message_text", "send_status", "response_memo"]),
     ]
     for table, title, cols in related_specs:
@@ -1430,19 +1533,28 @@ def build_ai_prompt(summary_type, source_text):
 ## 5. 次回確認
 - 次回の面談・連絡で確認するとよいことを3〜5個に絞る
 
-## 6. 専門家につなぐ可能性
-- 弁護士、司法書士、税理士、宅建士、ケアマネ、包括、動物病院など
+## 6. 制度候補整理
+空き家・住まい・高齢者・介護に関する制度候補がある場合だけ書いてください。
+候補が薄い場合は「現時点では制度候補は未確定」と書いてください。
+- 候補制度：空き家改修補助／耐震診断・耐震改修補助／解体補助／バリアフリー改修補助／介護保険住宅改修／住宅セーフティネット関連／固定資産税・特定空家関連／その他
+- なぜ候補になるか：
+- まだ確認が必要なこと：所在地市区町村、建築年、空き家期間、所有者、工事前か、要介護認定、見積書、通知書など
+- 注意点：自治体ごとに条件・年度予算・受付期間が変わるため断定しない
+- 次の一手：自治体要綱確認、窓口確認、関係専門職確認など
+
+## 7. 専門家につなぐ可能性
+- 弁護士、司法書士、税理士、宅建士、ケアマネ、包括、動物病院、自治体窓口など
 - ただし「必要」と断定せず「可能性」として整理する
 
-## 7. にゃんともとして関われる範囲
+## 8. にゃんともとして関われる範囲
 - 相談整理、記録、空き家見守り、関係者整理、次回確認など
 - 断定や交渉ではなく、整理・保留・伴走の範囲で書く
 
-## 8. にゃんともでは扱わない方がよい範囲
+## 9. にゃんともでは扱わない方がよい範囲
 - 紛争、税務判断、登記、医療判断、強い不動産判断など
 - 必要に応じて他専門職へつなぐ可能性として書く
 
-## 9. 内部メモ用の短い要約
+## 10. 内部メモ用の短い要約
 3〜5行で、今回の相談の見取り図を短くまとめる。
 
 整理種別：{summary_type}
@@ -2653,6 +2765,331 @@ def render_card_os_overview():
             with st.expander(f"{row.get('created_at', '')}｜{row.get('summary_type', '')}", expanded=False):
                 st.write(row.get("summary_text", ""))
 
+
+# ============================================================
+# Ver3.3：制度候補整理
+# ============================================================
+
+def build_policy_source_text(case_id):
+    """制度候補整理用に案件情報と関連カードをまとめる。"""
+    return build_case_ai_source(case_id)
+
+
+def suggest_policy_candidates_from_text(source_text):
+    """キーワードから制度候補を仮抽出する。断定ではなく候補整理。"""
+    text = normalize_text(source_text).lower()
+    suggestions = []
+    for category, spec in POLICY_CANDIDATE_TEMPLATES.items():
+        hits = []
+        for kw in spec.get("keywords", []):
+            if kw.lower() in text:
+                hits.append(kw)
+        if hits:
+            suggestions.append({
+                "category": category,
+                "policy_name": category,
+                "status": "候補",
+                "priority": "中",
+                "trigger_words": "、".join(hits[:8]),
+                "reason": f"相談内容に「{ '、'.join(hits[:5]) }」などの語があり、{category}の確認候補として整理できます。",
+                "check_items": spec.get("check_items", ""),
+                "caution": spec.get("caution", "") + "\n" + POLICY_DISCLAIMER,
+                "next_action": "所在地の自治体Webサイト・要綱・窓口で、対象要件と受付状況を確認する。",
+            })
+    return suggestions
+
+
+def build_policy_ai_prompt(source_text, extra_instruction=""):
+    return f"""
+あなたは『にゃんとも 住まいと猫の相談室』の内部用「制度候補整理AI」です。
+相談記録から、空き家・住まい・高齢者・介護に関係する制度や補助金の「確認候補」を整理してください。
+
+最重要ルール：
+- 「使えます」「もらえます」「対象です」と断定しない
+- 法律判断、税務判断、不動産判断、医療判断をしない
+- 自治体ごとに条件・年度予算・受付期間が異なる前提で書く
+- 相談者を急がせない
+- 申請を勧めるのではなく、確認候補と次回確認事項を並べる
+- 事実、未確認、候補、注意点を分ける
+- 着工前申請、所有者要件、建築年、空き家期間、要介護認定、見積書、自治体要綱確認などを重視する
+
+候補カテゴリ：
+- 空き家改修補助
+- 耐震診断・耐震改修補助
+- 解体補助
+- バリアフリー改修補助
+- 介護保険住宅改修
+- 住宅セーフティネット関連
+- 固定資産税・特定空家関連
+- その他制度
+
+出力形式：
+## 1. 制度候補の全体像
+- 現時点で候補になりそうな制度を短く整理
+
+## 2. 制度候補カード
+候補ごとに以下の形で整理してください。
+- 候補制度：
+- 候補度：高／中／低／要確認
+- なぜ候補になるか：
+- まだ確認が必要なこと：
+- 注意点：
+- 次の一手：
+
+## 3. 今すぐ申請判断しない方がよいこと
+- 断定や急ぎの判断を避ける項目
+
+## 4. 次回確認チェックリスト
+- 3〜8個に絞る
+
+## 5. 自治体・専門職へ確認する可能性
+- 自治体窓口、ケアマネ、宅建士、税理士、司法書士、弁護士など
+- 必要と断定せず「確認先候補」とする
+
+## 6. 内部メモ用の短い要約
+3〜5行でまとめる
+
+追加指示：{extra_instruction}
+
+相談記録：
+---
+{source_text}
+""".strip()
+
+
+def save_policy_candidate(case_id, client_id, values):
+    policy_id = make_id("policy")
+    execute("""
+        INSERT INTO policy_candidates
+        (policy_id, case_id, client_id, created_at, updated_at, updated_by,
+         category, policy_name, status, priority, municipality, trigger_words, reason,
+         check_items, caution, next_action, official_confirmed, official_url, memo)
+        VALUES
+        (%(policy_id)s, %(case_id)s, %(client_id)s, %(created_at)s, %(updated_at)s, %(updated_by)s,
+         %(category)s, %(policy_name)s, %(status)s, %(priority)s, %(municipality)s, %(trigger_words)s, %(reason)s,
+         %(check_items)s, %(caution)s, %(next_action)s, %(official_confirmed)s, %(official_url)s, %(memo)s)
+    """, {
+        "policy_id": policy_id,
+        "case_id": case_id,
+        "client_id": client_id,
+        "created_at": now_text(),
+        "updated_at": now_text(),
+        "updated_by": st.session_state.get("login_id", ""),
+        **values,
+    })
+    log_action("create", "policy_candidates", policy_id, "制度候補登録")
+    return policy_id
+
+
+def render_policy_candidates():
+    st.subheader("制度候補整理")
+    st.caption("空き家改修・耐震・解体・バリアフリー・介護保険住宅改修などを、断定せず『確認候補』として整理します。")
+    st.warning(POLICY_DISCLAIMER)
+
+    case_map, case_labels = get_case_options()
+    if not case_labels:
+        st.warning("先に相談者・案件を登録してください。")
+        return
+
+    selected_label = st.selectbox("対象案件", case_labels, key="policy_case_select")
+    case_id = case_map[selected_label]
+    client_id = case_to_client(case_id)
+    source_text = build_policy_source_text(case_id)
+
+    cols = st.columns(4)
+    with cols[0]:
+        total = fetch_one("SELECT COUNT(*) AS count FROM policy_candidates WHERE case_id=%(case_id)s", {"case_id": case_id})
+        st.metric("制度候補", int(total.get("count", 0)) if total else 0)
+    with cols[1]:
+        pending = fetch_one("SELECT COUNT(*) AS count FROM policy_candidates WHERE case_id=%(case_id)s AND COALESCE(status,'') IN ('候補','次回確認','自治体確認中')", {"case_id": case_id})
+        st.metric("確認中", int(pending.get("count", 0)) if pending else 0)
+    with cols[2]:
+        official = fetch_one("SELECT COUNT(*) AS count FROM policy_candidates WHERE case_id=%(case_id)s AND COALESCE(official_confirmed,0)=1", {"case_id": case_id})
+        st.metric("公式確認済", int(official.get("count", 0)) if official else 0)
+    with cols[3]:
+        st.metric("AIキー", "設定あり" if get_openai_api_key() else "未設定")
+
+    tab1, tab2, tab3 = st.tabs(["候補を登録", "AI制度候補整理", "一覧・更新"])
+
+    with tab1:
+        st.markdown("### 手動登録")
+        with st.form("policy_create"):
+            category = st.selectbox("制度カテゴリ", POLICY_CATEGORY_OPTIONS)
+            policy_name = st.text_input("制度名・候補名", value=category)
+            status = st.selectbox("状態", POLICY_STATUS_OPTIONS)
+            priority = st.selectbox("確認優先度", POLICY_PRIORITY_OPTIONS, index=1)
+            municipality = st.text_input("自治体・確認先", placeholder="例：綾瀬市、神奈川県、介護保険担当課")
+            trigger_words = st.text_input("候補になった言葉", placeholder="例：解体、老朽、固定資産税")
+            reason = st.text_area("候補になる理由")
+            check_items = st.text_area("次回確認事項", value=POLICY_CANDIDATE_TEMPLATES.get(category, {}).get("check_items", ""))
+            caution = st.text_area("注意点", value=(POLICY_CANDIDATE_TEMPLATES.get(category, {}).get("caution", "") + "\n" + POLICY_DISCLAIMER).strip())
+            next_action = st.text_area("次の一手", value="自治体の最新要綱・受付状況・対象要件を確認する。")
+            official_confirmed = st.checkbox("公式要綱・自治体窓口で確認済み")
+            official_url = st.text_input("公式URL・参照先メモ")
+            memo = st.text_area("内部メモ")
+            ok = st.form_submit_button("制度候補を登録", disabled=not can_write())
+        if ok:
+            save_policy_candidate(case_id, client_id, {
+                "category": category,
+                "policy_name": policy_name or category,
+                "status": status,
+                "priority": priority,
+                "municipality": municipality,
+                "trigger_words": trigger_words,
+                "reason": reason,
+                "check_items": check_items,
+                "caution": caution,
+                "next_action": next_action,
+                "official_confirmed": 1 if official_confirmed else 0,
+                "official_url": official_url,
+                "memo": memo,
+            })
+            st.success("制度候補を登録しました。")
+            st.rerun()
+
+        st.markdown("### キーワードから候補を仮抽出")
+        with st.expander("抽出元データを確認", expanded=False):
+            st.text_area("抽出元データ", source_text, height=260)
+        suggestions = suggest_policy_candidates_from_text(source_text)
+        if not suggestions:
+            st.info("現時点では、キーワードから自動抽出できる制度候補はありません。手動登録またはAI整理を使ってください。")
+        else:
+            st.write("以下はキーワードによる仮候補です。必要なものだけ登録してください。")
+            for i, sug in enumerate(suggestions):
+                with st.expander(f"候補：{sug['category']}｜きっかけ：{sug['trigger_words']}", expanded=False):
+                    st.write(sug["reason"])
+                    st.text_area("確認事項", sug["check_items"], key=f"sug_check_{i}", height=90)
+                    st.text_area("注意点", sug["caution"], key=f"sug_caution_{i}", height=110)
+                    if st.button("この候補を登録", key=f"save_sug_{i}", disabled=not can_write()):
+                        values = {
+                            "category": sug["category"],
+                            "policy_name": sug["policy_name"],
+                            "status": sug["status"],
+                            "priority": sug["priority"],
+                            "municipality": "",
+                            "trigger_words": sug["trigger_words"],
+                            "reason": sug["reason"],
+                            "check_items": sug["check_items"],
+                            "caution": sug["caution"],
+                            "next_action": sug["next_action"],
+                            "official_confirmed": 0,
+                            "official_url": "",
+                            "memo": "キーワード仮抽出から登録",
+                        }
+                        save_policy_candidate(case_id, client_id, values)
+                        st.success("候補を登録しました。")
+                        st.rerun()
+
+    with tab2:
+        st.markdown("### AIで制度候補を整理")
+        st.info("AIは候補を並べるだけです。最新要綱や受付状況の確認は、必ず自治体・公式資料で行ってください。")
+        extra_instruction = st.text_area("追加指示", placeholder="例：今回は空き家解体補助と耐震補助の可能性を中心に整理。", key="policy_ai_extra")
+        with st.expander("AIに渡す元データ", expanded=False):
+            st.text_area("元データ", source_text, height=300, key="policy_ai_source")
+        if st.button("制度候補整理AIを作成して保存", disabled=not can_write()):
+            if not source_text.strip():
+                st.error("整理対象のデータがありません。")
+            else:
+                try:
+                    with st.spinner("制度候補整理AIを作成しています..."):
+                        prompt = build_policy_ai_prompt(source_text, extra_instruction)
+                        summary_text, model = call_openai_summary(prompt)
+                        save_ai_summary(case_id, client_id, "カード整理AI｜制度候補整理", source_text, summary_text, extra_instruction, model)
+                    st.success("制度候補整理AIを保存しました。AI要約メモにも表示されます。")
+                    st.rerun()
+                except Exception as e:
+                    st.error("制度候補整理AIの作成に失敗しました。")
+                    st.exception(e)
+
+        df_ai = fetch_df("""
+            SELECT summary_id, created_at, summary_type, summary_text, memo
+            FROM ai_summaries
+            WHERE case_id=%(case_id)s AND summary_type='カード整理AI｜制度候補整理'
+            ORDER BY created_at DESC
+        """, {"case_id": case_id})
+        if df_ai.empty:
+            st.info("保存済みの制度候補整理AIはありません。")
+        else:
+            for _, row in df_ai.iterrows():
+                with st.expander(f"{row.get('created_at','')}｜制度候補整理AI", expanded=False):
+                    st.markdown(row.get("summary_text", ""))
+
+    with tab3:
+        st.markdown("### 登録済み制度候補")
+        df = fetch_df("""
+            SELECT policy_id, created_at, updated_at, category, policy_name, status, priority,
+                   municipality, trigger_words, reason, check_items, caution, next_action,
+                   official_confirmed, official_url, memo
+            FROM policy_candidates
+            WHERE case_id=%(case_id)s
+            ORDER BY updated_at DESC NULLS LAST, created_at DESC
+        """, {"case_id": case_id})
+        if df.empty:
+            st.info("登録済みの制度候補はありません。")
+            return
+        st.dataframe(df, use_container_width=True, hide_index=True)
+
+        if can_write():
+            selected = st.selectbox("更新・削除する制度候補", df["policy_id"].tolist())
+            row = df[df["policy_id"] == selected].iloc[0]
+            with st.form("policy_edit"):
+                category = st.selectbox("制度カテゴリ", POLICY_CATEGORY_OPTIONS, index=POLICY_CATEGORY_OPTIONS.index(row["category"]) if row["category"] in POLICY_CATEGORY_OPTIONS else 0)
+                policy_name = st.text_input("制度名・候補名", normalize_text(row["policy_name"]))
+                status = st.selectbox("状態", POLICY_STATUS_OPTIONS, index=POLICY_STATUS_OPTIONS.index(row["status"]) if row["status"] in POLICY_STATUS_OPTIONS else 0)
+                priority = st.selectbox("確認優先度", POLICY_PRIORITY_OPTIONS, index=POLICY_PRIORITY_OPTIONS.index(row["priority"]) if row["priority"] in POLICY_PRIORITY_OPTIONS else 1)
+                municipality = st.text_input("自治体・確認先", normalize_text(row["municipality"]))
+                trigger_words = st.text_input("候補になった言葉", normalize_text(row["trigger_words"]))
+                reason = st.text_area("候補になる理由", normalize_text(row["reason"]))
+                check_items = st.text_area("次回確認事項", normalize_text(row["check_items"]))
+                caution = st.text_area("注意点", normalize_text(row["caution"]))
+                next_action = st.text_area("次の一手", normalize_text(row["next_action"]))
+                official_confirmed = st.checkbox("公式要綱・自治体窓口で確認済み", value=bool(row.get("official_confirmed", 0)))
+                official_url = st.text_input("公式URL・参照先メモ", normalize_text(row["official_url"]))
+                memo = st.text_area("内部メモ", normalize_text(row["memo"]))
+                delete_confirm = st.checkbox("この制度候補を削除することを確認しました。")
+                delete_text = st.text_input("削除する場合は DELETE と入力", key="policy_delete_text")
+                c1, c2 = st.columns(2)
+                update = c1.form_submit_button("更新する")
+                delete = c2.form_submit_button("削除する")
+            if update:
+                execute("""
+                    UPDATE policy_candidates SET
+                        updated_at=%(updated_at)s, updated_by=%(updated_by)s, category=%(category)s,
+                        policy_name=%(policy_name)s, status=%(status)s, priority=%(priority)s,
+                        municipality=%(municipality)s, trigger_words=%(trigger_words)s, reason=%(reason)s,
+                        check_items=%(check_items)s, caution=%(caution)s, next_action=%(next_action)s,
+                        official_confirmed=%(official_confirmed)s, official_url=%(official_url)s, memo=%(memo)s
+                    WHERE policy_id=%(policy_id)s
+                """, {
+                    "updated_at": now_text(),
+                    "updated_by": st.session_state.get("login_id", ""),
+                    "category": category,
+                    "policy_name": policy_name,
+                    "status": status,
+                    "priority": priority,
+                    "municipality": municipality,
+                    "trigger_words": trigger_words,
+                    "reason": reason,
+                    "check_items": check_items,
+                    "caution": caution,
+                    "next_action": next_action,
+                    "official_confirmed": 1 if official_confirmed else 0,
+                    "official_url": official_url,
+                    "memo": memo,
+                    "policy_id": selected,
+                })
+                log_action("update", "policy_candidates", selected, "制度候補更新")
+                st.success("制度候補を更新しました。")
+                st.rerun()
+            if delete:
+                if not delete_confirm or delete_text != "DELETE":
+                    st.error("削除するには確認チェックを入れ、DELETE と入力してください。")
+                else:
+                    execute("DELETE FROM policy_candidates WHERE policy_id=%(policy_id)s", {"policy_id": selected})
+                    log_action("delete", "policy_candidates", selected, "制度候補削除")
+                    st.success("制度候補を削除しました。")
+                    st.rerun()
+
 def render_ai_summary():
     st.subheader("カード整理AI")
     st.caption("相談記録を単に要約するのではなく、相談者の悩み・基本情報カード・保留事項を読み取り、カードとして並べ直します。")
@@ -2690,6 +3127,7 @@ def render_ai_summary():
             "カード整理AI｜初回整理",
             "カード整理AI｜次回確認",
             "カード整理AI｜保留事項整理",
+            "カード整理AI｜制度候補整理",
             "カード整理AI｜家族共有前整理",
             "カード整理AI｜内部メモ",
             "カード整理AI｜相談者向けやわらか要約",
@@ -3782,6 +4220,7 @@ NYANTOMO_V2_MENUS = [
     "Ver2.0｜カードOS俯瞰",
     "Ver2.0｜カード整理",
     "Ver2.0｜保留事項管理",
+    "Ver3.3｜制度候補整理",
 ]
 for m in NYANTOMO_V2_MENUS:
     if m not in available_menus:
@@ -3830,6 +4269,8 @@ elif menu == "Ver2.0｜カード整理":
     render_consultation_cards()
 elif menu == "Ver2.0｜保留事項管理":
     render_pending_items()
+elif menu == "Ver3.3｜制度候補整理":
+    render_policy_candidates()
 elif menu == "空き家カード":
     related_card_page("properties", "property_id", "空き家カード", [
         ("property_name", "物件名", "text"),
