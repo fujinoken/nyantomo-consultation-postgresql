@@ -92,27 +92,74 @@ SUPPORT_CATEGORY_OPTIONS = [
 
 
 # ============================================================
-# Ver3.3：制度候補整理 設定
+# Ver3.4：生活制度候補整理 設定
 # ------------------------------------------------------------
-# 補助金・制度は自治体ごとに条件、年度予算、受付期間が変わるため、
-# 「使える」と断定せず、確認候補・次回確認事項として整理します。
+# 補助金だけでなく、空き家・高齢者・猫・相続の相談で出てくる
+# 「確認候補」を横断的に整理します。
+# 使える／必要／対象と断定せず、候補・未確認・次回確認として扱います。
 # ============================================================
 
+POLICY_DOMAIN_OPTIONS = [
+    "空き家",
+    "高齢者",
+    "猫",
+    "相続",
+    "横断・その他",
+]
+
 POLICY_CATEGORY_OPTIONS = [
+    # 空き家
     "空き家改修補助",
-    "耐震診断・耐震改修補助",
     "解体補助",
-    "バリアフリー改修補助",
-    "介護保険住宅改修",
+    "耐震診断・耐震改修補助",
     "住宅セーフティネット関連",
     "固定資産税・特定空家関連",
-    "その他制度",
+    # 高齢者
+    "介護保険住宅改修",
+    "福祉用具",
+    "高齢者住宅",
+    "地域包括・介護相談",
+    # 猫
+    "猫の預かり先候補",
+    "動物病院",
+    "ペット信託",
+    "任意後見",
+    # 相続
+    "遺言",
+    "家族信託",
+    "相続人調査",
+    "遺産分割・相続手続き",
+    # その他
+    "その他制度・確認候補",
 ]
+
+POLICY_CATEGORY_DOMAIN_MAP = {
+    "空き家改修補助": "空き家",
+    "解体補助": "空き家",
+    "耐震診断・耐震改修補助": "空き家",
+    "住宅セーフティネット関連": "空き家",
+    "固定資産税・特定空家関連": "空き家",
+    "介護保険住宅改修": "高齢者",
+    "福祉用具": "高齢者",
+    "高齢者住宅": "高齢者",
+    "地域包括・介護相談": "高齢者",
+    "猫の預かり先候補": "猫",
+    "動物病院": "猫",
+    "ペット信託": "猫",
+    "任意後見": "猫",
+    "遺言": "相続",
+    "家族信託": "相続",
+    "相続人調査": "相続",
+    "遺産分割・相続手続き": "相続",
+    "その他制度・確認候補": "横断・その他",
+}
 
 POLICY_STATUS_OPTIONS = [
     "候補",
     "次回確認",
     "自治体確認中",
+    "関係先確認中",
+    "専門職確認中",
     "対象外の可能性",
     "申請準備",
     "保留",
@@ -122,46 +169,126 @@ POLICY_STATUS_OPTIONS = [
 POLICY_PRIORITY_OPTIONS = ["低", "中", "高", "要確認"]
 
 POLICY_DISCLAIMER = (
-    "※制度・補助金は自治体ごとに条件、年度予算、受付期間、対象工事、所有者要件が異なります。"
-    "この画面は『使える制度の断定』ではなく、正式確認のための候補整理です。"
-    "最終判断は必ず最新の自治体要綱・窓口確認・専門職確認により行ってください。"
+    "※この画面は『使える制度・必要な手続きの断定』ではなく、正式確認のための候補整理です。"
+    "制度・補助金は自治体ごとに条件、年度予算、受付期間、対象工事、所有者要件が異なります。"
+    "後見・信託・遺言・相続・医療・介護・不動産に関する最終判断は、必ず最新資料・窓口・関係専門職で確認してください。"
 )
 
 POLICY_CANDIDATE_TEMPLATES = {
+    # 空き家
     "空き家改修補助": {
         "keywords": ["改修", "リフォーム", "修繕", "直したい", "貸したい", "住みたい", "活用"],
         "check_items": "所在地市区町村／空き家期間／所有者／改修目的／工事内容／見積書／市内業者要件／着工前申請か",
         "caution": "着工後申請は対象外となる制度が多いため、工事契約・着工前に確認する。",
-    },
-    "耐震診断・耐震改修補助": {
-        "keywords": ["耐震", "昭和", "旧耐震", "1981", "1981年", "地震", "倒壊", "古い家"],
-        "check_items": "建築年／木造か／過去の耐震診断歴／建築確認資料／所有者／居住予定／自治体の診断制度",
-        "caution": "旧耐震の可能性がある場合は、改修や活用判断の前に耐震診断の候補を確認する。",
+        "next_action": spec.get("next_action", "自治体・支援機関・関係専門職で、最新情報と対象要件を確認する。"),
     },
     "解体補助": {
         "keywords": ["解体", "取り壊し", "老朽", "危険", "倒れそう", "更地", "壊す", "除却"],
         "check_items": "建物状態／老朽度／近隣への危険／所有者／相続登記状況／見積書／事前調査／固定資産税影響",
         "caution": "解体後に固定資産税や土地利用の影響が出ることがあるため、急いで決めない。",
+        "next_action": "解体の前に、補助対象・税影響・相続登記状況を整理する。",
     },
-    "バリアフリー改修補助": {
-        "keywords": ["手すり", "段差", "転倒", "車椅子", "バリアフリー", "玄関", "浴室", "トイレ"],
-        "check_items": "本人の居住予定／要介護認定の有無／改修箇所／ケアマネ関与／住宅改修理由書／見積書",
-        "caution": "介護保険住宅改修と自治体独自補助の併用可否を確認する。",
-    },
-    "介護保険住宅改修": {
-        "keywords": ["要介護", "要支援", "ケアマネ", "介護保険", "住宅改修", "手すり", "段差解消"],
-        "check_items": "要介護・要支援認定／ケアマネ／住宅改修理由書／対象工事／事前申請／支給限度基準額",
-        "caution": "原則として事前申請が必要。行政書士単独で判断せず、ケアマネ・自治体窓口と確認する。",
+    "耐震診断・耐震改修補助": {
+        "keywords": ["耐震", "昭和", "旧耐震", "1981", "1981年", "地震", "倒壊", "古い家"],
+        "check_items": "建築年／木造か／過去の耐震診断歴／建築確認資料／所有者／居住予定／自治体の診断制度",
+        "caution": "旧耐震の可能性がある場合は、改修や活用判断の前に耐震診断の候補を確認する。",
+        "next_action": "建築年と自治体の耐震診断・改修補助の有無を確認する。",
     },
     "住宅セーフティネット関連": {
         "keywords": ["高齢者", "賃貸", "貸す", "住まい", "住宅確保", "セーフティネット", "見守り", "入居"],
         "check_items": "賃貸化の意向／住宅確保要配慮者への提供可能性／登録住宅制度／改修必要性／管理体制",
         "caution": "賃貸化は収益判断・管理責任・入居者支援が絡むため、制度候補として慎重に整理する。",
+        "next_action": "登録住宅制度・改修支援・管理体制を確認候補として整理する。",
     },
     "固定資産税・特定空家関連": {
         "keywords": ["固定資産税", "特定空家", "管理不全", "勧告", "指導", "近隣", "苦情", "雑草"],
         "check_items": "自治体からの通知／現地状態／近隣苦情／草木・破損・越境／管理履歴／写真記録",
         "caution": "税務判断や行政処分対応は断定せず、通知文書と自治体窓口確認を優先する。",
+        "next_action": "通知文書・現地写真・管理履歴をそろえ、自治体窓口確認の候補にする。",
+    },
+
+    # 高齢者
+    "介護保険住宅改修": {
+        "keywords": ["要介護", "要支援", "ケアマネ", "介護保険", "住宅改修", "手すり", "段差解消"],
+        "check_items": "要介護・要支援認定／ケアマネ／住宅改修理由書／対象工事／事前申請／支給限度基準額",
+        "caution": "原則として事前申請が必要。行政書士単独で判断せず、ケアマネ・自治体窓口と確認する。",
+        "next_action": "ケアマネまたは自治体介護保険窓口へ確認する候補として整理する。",
+    },
+    "福祉用具": {
+        "keywords": ["福祉用具", "歩行器", "車椅子", "ベッド", "手すり", "転倒", "レンタル", "購入"],
+        "check_items": "要介護認定／ケアマネ有無／必要な用具／レンタルか購入か／住環境／転倒リスク",
+        "caution": "福祉用具の適否は身体状況や介護保険制度が関係するため、ケアマネ等へ確認する。",
+        "next_action": "ケアマネ・福祉用具専門相談員への確認候補として整理する。",
+    },
+    "高齢者住宅": {
+        "keywords": ["施設", "入居", "老人ホーム", "サ高住", "高齢者住宅", "一人暮らし", "住み替え", "見守り"],
+        "check_items": "本人希望／予算／介護度／医療対応／猫との関係／保証人／空き家になる住まい／見学予定",
+        "caution": "入居判断は本人の意思・家族関係・費用・猫の行き先と絡むため、急いで決めない。",
+        "next_action": "住み替え候補・猫の行き先・空き家管理の3点を分けて確認する。",
+    },
+    "地域包括・介護相談": {
+        "keywords": ["包括", "地域包括", "介護相談", "認知症", "見守り", "独居", "一人暮らし", "ケアマネ"],
+        "check_items": "本人住所地／相談者との関係／本人同意／困りごと／緊急度／既存支援者／医療・介護状況",
+        "caution": "支援につなぐ場合も、本人の意思と緊急性を分けて整理する。",
+        "next_action": "地域包括支援センター等への相談候補として整理する。",
+    },
+
+    # 猫
+    "猫の預かり先候補": {
+        "keywords": ["猫", "預かり", "保護", "入院", "施設", "世話", "引き取り", "ペットホテル"],
+        "check_items": "猫の頭数／年齢／持病／性格／ワクチン／避妊去勢／預かり期間／費用／緊急連絡先",
+        "caution": "預かり先は制度ではなく生活支援・民間連携の候補。安易に確定せず、猫の状態と費用を確認する。",
+        "next_action": "動物病院・親族・預かり先候補・保護団体等を分けて整理する。",
+    },
+    "動物病院": {
+        "keywords": ["動物病院", "ワクチン", "通院", "持病", "薬", "診察", "去勢", "避妊", "健康"],
+        "check_items": "かかりつけ医／診療記録／薬／ワクチン／緊急時対応／預かり可否／連絡先",
+        "caution": "医療判断は行わず、記録と連絡先の整理にとどめる。",
+        "next_action": "かかりつけ動物病院の情報を猫カードへ整理する。",
+    },
+    "ペット信託": {
+        "keywords": ["ペット信託", "信託", "猫の将来", "お金を残す", "世話人", "受託者", "もしもの時"],
+        "check_items": "委託者／受託者候補／世話人候補／信託財産／猫の生活費／監督者／公正証書化の希望",
+        "caution": "信託は契約設計が必要。制度説明はできても、最終設計は本人意思・関係者確認を踏まえる。",
+        "next_action": "猫の生活費・世話人・受託者候補を分けて確認する。",
+    },
+    "任意後見": {
+        "keywords": ["任意後見", "後見", "認知症", "判断能力", "将来不安", "施設入所", "財産管理", "見守り契約"],
+        "check_items": "本人意思／判断能力の状態／任意後見受任者候補／見守り契約／財産管理／猫の世話との関係",
+        "caution": "後見の要否は断定せず、本人の意思確認と専門職・公証役場等の確認候補として扱う。",
+        "next_action": "任意後見・見守り契約・猫の将来を分けて整理する。",
+    },
+
+    # 相続
+    "遺言": {
+        "keywords": ["遺言", "公正証書", "遺贈", "相続", "財産を残す", "死後", "猫に残す", "遺言執行"],
+        "check_items": "本人意思／相続人候補／財産概要／猫に関する希望／遺言執行者／公正証書希望／遺留分配慮",
+        "caution": "遺言内容の良し悪しを断定せず、本人意思と財産・相続人の整理を優先する。",
+        "next_action": "財産一覧・相続人候補・猫への希望を分けて確認する。",
+    },
+    "家族信託": {
+        "keywords": ["家族信託", "民事信託", "信託", "認知症対策", "財産管理", "親の家", "不動産管理"],
+        "check_items": "委託者／受託者候補／信託財産／目的／家族関係／不動産の有無／専門職連携",
+        "caution": "家族信託は高度な設計が必要。行政書士単独で完結させず、司法書士・税理士等との連携候補にする。",
+        "next_action": "家族関係・財産・目的を整理し、必要に応じ専門職確認候補とする。",
+    },
+    "相続人調査": {
+        "keywords": ["相続人", "戸籍", "相続関係", "兄弟", "子ども", "親族", "誰が相続", "法定相続人"],
+        "check_items": "被相続人／死亡日／本籍地情報／戸籍取得範囲／相続人候補／連絡可能性／関係性",
+        "caution": "相続人確定には戸籍確認が必要。聞き取りだけで断定しない。",
+        "next_action": "戸籍収集・相続関係説明図作成の候補として整理する。",
+    },
+    "遺産分割・相続手続き": {
+        "keywords": ["遺産分割", "協議書", "相続手続き", "預金", "不動産", "名義変更", "相続登記"],
+        "check_items": "相続人確定／財産一覧／遺言有無／不動産有無／相続登記状況／紛争性／専門職連携",
+        "caution": "紛争性がある場合は弁護士、登記は司法書士、税務は税理士の確認候補とする。",
+        "next_action": "相続人・財産・紛争性・専門職連携の必要性を整理する。",
+    },
+    "その他制度・確認候補": {
+        "keywords": ["制度", "補助", "助成", "相談", "窓口", "申請", "支援", "確認"],
+        "check_items": "相談テーマ／所在地／本人意思／緊急度／関係者／確認先／期限／必要資料",
+        "caution": "制度名が未確定な段階では、無理に制度へ当てはめず、確認候補として置く。",
+        "next_action": "制度名を決めつけず、自治体・専門職・関係機関の確認先候補を整理する。",
     },
 }
 
@@ -620,7 +747,7 @@ def render_dashboard():
             height=180
         )
 
-    st.markdown('<div class="ny-footer">© にゃんとも相談管理 Ver3.3 制度候補整理対応｜安定・安全・効率的な相談業務をサポートします 🐾</div>', unsafe_allow_html=True)
+    st.markdown('<div class="ny-footer">© にゃんとも相談管理 Ver3.4 生活制度候補整理対応｜安定・安全・効率的な相談業務をサポートします 🐾</div>', unsafe_allow_html=True)
 
 
 
@@ -1133,7 +1260,7 @@ def ensure_extension_tables():
     """)
 
     # ========================================================
-    # Ver3.3：制度候補整理 追加テーブル
+    # Ver3.4：生活制度候補整理 追加テーブル
     # ========================================================
     execute("""
         CREATE TABLE IF NOT EXISTS policy_candidates (
@@ -1470,7 +1597,7 @@ def build_case_ai_source(case_id):
         ("family", "家族関係メモ", ["name", "relation", "contact_ok", "temperature", "memo"]),
         ("consultation_cards", "Ver2.1カード整理", ["card_type", "card_status", "related_label", "concern", "client_words", "current_state", "unknown_items", "related_people_places", "next_check_items", "memo"]),
         ("pending_items", "Ver2.0保留事項", ["theme", "reason", "deadline_type", "next_check_date", "related_people", "caution", "status", "memo"]),
-        ("policy_candidates", "Ver3.3制度候補整理", ["category", "policy_name", "status", "priority", "municipality", "trigger_words", "reason", "check_items", "caution", "next_action", "official_confirmed", "official_url", "memo"]),
+        ("policy_candidates", "Ver3.4生活制度候補整理", ["category", "policy_name", "status", "priority", "municipality", "trigger_words", "reason", "check_items", "caution", "next_action", "official_confirmed", "official_url", "memo"]),
         ("line_messages", "LINEメモ", ["to_target", "message_text", "send_status", "response_memo"]),
     ]
     for table, title, cols in related_specs:
@@ -1533,14 +1660,15 @@ def build_ai_prompt(summary_type, source_text):
 ## 5. 次回確認
 - 次回の面談・連絡で確認するとよいことを3〜5個に絞る
 
-## 6. 制度候補整理
-空き家・住まい・高齢者・介護に関する制度候補がある場合だけ書いてください。
+## 6. 生活制度候補整理
+空き家・高齢者・猫・相続に関する確認候補がある場合だけ書いてください。
 候補が薄い場合は「現時点では制度候補は未確定」と書いてください。
-- 候補制度：空き家改修補助／耐震診断・耐震改修補助／解体補助／バリアフリー改修補助／介護保険住宅改修／住宅セーフティネット関連／固定資産税・特定空家関連／その他
+- 領域：空き家／高齢者／猫／相続／横断
+- 候補名：空き家改修補助／解体補助／耐震補助／住宅セーフティネット／介護保険住宅改修／福祉用具／高齢者住宅／猫の預かり先／動物病院／ペット信託／任意後見／遺言／家族信託／相続人調査など
 - なぜ候補になるか：
-- まだ確認が必要なこと：所在地市区町村、建築年、空き家期間、所有者、工事前か、要介護認定、見積書、通知書など
-- 注意点：自治体ごとに条件・年度予算・受付期間が変わるため断定しない
-- 次の一手：自治体要綱確認、窓口確認、関係専門職確認など
+- まだ確認が必要なこと：所在地、建築年、空き家期間、所有者、要介護認定、猫の状態、本人意思、相続人候補、財産概要、関係者など
+- 注意点：制度・手続き・専門職領域が異なるため断定しない
+- 次の一手：自治体要綱確認、地域包括・ケアマネ確認、動物病院確認、専門職確認など
 
 ## 7. 専門家につなぐ可能性
 - 弁護士、司法書士、税理士、宅建士、ケアマネ、包括、動物病院、自治体窓口など
@@ -2767,7 +2895,7 @@ def render_card_os_overview():
 
 
 # ============================================================
-# Ver3.3：制度候補整理
+# Ver3.4：生活制度候補整理
 # ============================================================
 
 def build_policy_source_text(case_id):
@@ -2791,62 +2919,83 @@ def suggest_policy_candidates_from_text(source_text):
                 "status": "候補",
                 "priority": "中",
                 "trigger_words": "、".join(hits[:8]),
-                "reason": f"相談内容に「{ '、'.join(hits[:5]) }」などの語があり、{category}の確認候補として整理できます。",
+                "reason": f"相談内容に「{ '、'.join(hits[:5]) }」などの語があり、{POLICY_CATEGORY_DOMAIN_MAP.get(category, '横断')}領域の確認候補として整理できます。",
                 "check_items": spec.get("check_items", ""),
                 "caution": spec.get("caution", "") + "\n" + POLICY_DISCLAIMER,
-                "next_action": "所在地の自治体Webサイト・要綱・窓口で、対象要件と受付状況を確認する。",
+                "next_action": spec.get("next_action", "自治体・支援機関・関係専門職で、最新情報と対象要件を確認する。"),
             })
     return suggestions
 
 
 def build_policy_ai_prompt(source_text, extra_instruction=""):
     return f"""
-あなたは『にゃんとも 住まいと猫の相談室』の内部用「制度候補整理AI」です。
-相談記録から、空き家・住まい・高齢者・介護に関係する制度や補助金の「確認候補」を整理してください。
+あなたは『にゃんとも 住まいと猫の相談室』の内部用「生活制度候補整理AI」です。
+相談記録から、空き家・高齢者・猫・相続に関係する制度・支援先・専門職連携の「確認候補」を整理してください。
 
 最重要ルール：
-- 「使えます」「もらえます」「対象です」と断定しない
-- 法律判断、税務判断、不動産判断、医療判断をしない
-- 自治体ごとに条件・年度予算・受付期間が異なる前提で書く
+- 「使えます」「もらえます」「必要です」「対象です」と断定しない
+- 法律判断、税務判断、不動産判断、医療・介護判断をしない
+- 自治体・制度・専門職の領域ごとに確認先が異なる前提で書く
 - 相談者を急がせない
-- 申請を勧めるのではなく、確認候補と次回確認事項を並べる
+- 申請・契約・売却・入所・後見開始を勧めるのではなく、確認候補と次回確認事項を並べる
 - 事実、未確認、候補、注意点を分ける
-- 着工前申請、所有者要件、建築年、空き家期間、要介護認定、見積書、自治体要綱確認などを重視する
+- 本人の意思、猫の生活、家族関係、住まいの状態を分断せずに整理する
 
 候補カテゴリ：
+【空き家】
 - 空き家改修補助
-- 耐震診断・耐震改修補助
 - 解体補助
-- バリアフリー改修補助
-- 介護保険住宅改修
+- 耐震診断・耐震改修補助
 - 住宅セーフティネット関連
 - 固定資産税・特定空家関連
-- その他制度
+
+【高齢者】
+- 介護保険住宅改修
+- 福祉用具
+- 高齢者住宅
+- 地域包括・介護相談
+
+【猫】
+- 猫の預かり先候補
+- 動物病院
+- ペット信託
+- 任意後見
+
+【相続】
+- 遺言
+- 家族信託
+- 相続人調査
+- 遺産分割・相続手続き
 
 出力形式：
-## 1. 制度候補の全体像
-- 現時点で候補になりそうな制度を短く整理
+## 1. 生活制度候補の全体像
+- 現時点で候補になりそうな制度・支援先・専門職連携を短く整理
 
-## 2. 制度候補カード
+## 2. 候補カード
 候補ごとに以下の形で整理してください。
-- 候補制度：
+- 領域：空き家／高齢者／猫／相続／横断
+- 候補名：
 - 候補度：高／中／低／要確認
 - なぜ候補になるか：
 - まだ確認が必要なこと：
 - 注意点：
 - 次の一手：
 
-## 3. 今すぐ申請判断しない方がよいこと
-- 断定や急ぎの判断を避ける項目
+## 3. 今すぐ決めなくてよいこと
+- 売却、解体、入所、後見、信託、遺言内容、猫の預け先など、急がせない方がよい項目
 
 ## 4. 次回確認チェックリスト
-- 3〜8個に絞る
+- 3〜10個に絞る
 
-## 5. 自治体・専門職へ確認する可能性
-- 自治体窓口、ケアマネ、宅建士、税理士、司法書士、弁護士など
+## 5. 確認先候補
+- 自治体窓口、地域包括、ケアマネ、動物病院、預かり先候補、宅建士、司法書士、税理士、弁護士、公証役場など
 - 必要と断定せず「確認先候補」とする
 
-## 6. 内部メモ用の短い要約
+## 6. にゃんともとして関われる範囲
+- 相談整理、記録、保留管理、空き家見守り、関係者整理、次回確認など
+- 交渉・登記・税務・医療判断・強い不動産判断はしない
+
+## 7. 内部メモ用の短い要約
 3〜5行でまとめる
 
 追加指示：{extra_instruction}
@@ -2855,7 +3004,6 @@ def build_policy_ai_prompt(source_text, extra_instruction=""):
 ---
 {source_text}
 """.strip()
-
 
 def save_policy_candidate(case_id, client_id, values):
     policy_id = make_id("policy")
@@ -2882,8 +3030,8 @@ def save_policy_candidate(case_id, client_id, values):
 
 
 def render_policy_candidates():
-    st.subheader("制度候補整理")
-    st.caption("空き家改修・耐震・解体・バリアフリー・介護保険住宅改修などを、断定せず『確認候補』として整理します。")
+    st.subheader("生活制度候補整理")
+    st.caption("空き家・高齢者・猫・相続に関係する制度・支援先・専門職連携候補を、断定せず『確認候補』として整理します。")
     st.warning(POLICY_DISCLAIMER)
 
     case_map, case_labels = get_case_options()
@@ -2909,25 +3057,25 @@ def render_policy_candidates():
     with cols[3]:
         st.metric("AIキー", "設定あり" if get_openai_api_key() else "未設定")
 
-    tab1, tab2, tab3 = st.tabs(["候補を登録", "AI制度候補整理", "一覧・更新"])
+    tab1, tab2, tab3 = st.tabs(["候補を登録", "AI生活制度候補整理", "一覧・更新"])
 
     with tab1:
         st.markdown("### 手動登録")
         with st.form("policy_create"):
             category = st.selectbox("制度カテゴリ", POLICY_CATEGORY_OPTIONS)
-            policy_name = st.text_input("制度名・候補名", value=category)
+            policy_name = st.text_input("制度・支援・手続き候補名", value=category)
             status = st.selectbox("状態", POLICY_STATUS_OPTIONS)
             priority = st.selectbox("確認優先度", POLICY_PRIORITY_OPTIONS, index=1)
-            municipality = st.text_input("自治体・確認先", placeholder="例：綾瀬市、神奈川県、介護保険担当課")
+            municipality = st.text_input("自治体・支援先・専門職確認先", placeholder="例：綾瀬市、神奈川県、介護保険担当課")
             trigger_words = st.text_input("候補になった言葉", placeholder="例：解体、老朽、固定資産税")
             reason = st.text_area("候補になる理由")
             check_items = st.text_area("次回確認事項", value=POLICY_CANDIDATE_TEMPLATES.get(category, {}).get("check_items", ""))
             caution = st.text_area("注意点", value=(POLICY_CANDIDATE_TEMPLATES.get(category, {}).get("caution", "") + "\n" + POLICY_DISCLAIMER).strip())
-            next_action = st.text_area("次の一手", value="自治体の最新要綱・受付状況・対象要件を確認する。")
+            next_action = st.text_area("次の一手", value="自治体・支援機関・関係専門職で、最新情報と対象要件を確認する。")
             official_confirmed = st.checkbox("公式要綱・自治体窓口で確認済み")
             official_url = st.text_input("公式URL・参照先メモ")
             memo = st.text_area("内部メモ")
-            ok = st.form_submit_button("制度候補を登録", disabled=not can_write())
+            ok = st.form_submit_button("生活制度候補を登録", disabled=not can_write())
         if ok:
             save_policy_candidate(case_id, client_id, {
                 "category": category,
@@ -2944,7 +3092,7 @@ def render_policy_candidates():
                 "official_url": official_url,
                 "memo": memo,
             })
-            st.success("制度候補を登録しました。")
+            st.success("生活生活制度候補を登録しました。")
             st.rerun()
 
         st.markdown("### キーワードから候補を仮抽出")
@@ -2986,36 +3134,36 @@ def render_policy_candidates():
         extra_instruction = st.text_area("追加指示", placeholder="例：今回は空き家解体補助と耐震補助の可能性を中心に整理。", key="policy_ai_extra")
         with st.expander("AIに渡す元データ", expanded=False):
             st.text_area("元データ", source_text, height=300, key="policy_ai_source")
-        if st.button("制度候補整理AIを作成して保存", disabled=not can_write()):
+        if st.button("生活制度候補整理AIを作成して保存", disabled=not can_write()):
             if not source_text.strip():
                 st.error("整理対象のデータがありません。")
             else:
                 try:
-                    with st.spinner("制度候補整理AIを作成しています..."):
+                    with st.spinner("生活制度候補整理AIを作成しています..."):
                         prompt = build_policy_ai_prompt(source_text, extra_instruction)
                         summary_text, model = call_openai_summary(prompt)
-                        save_ai_summary(case_id, client_id, "カード整理AI｜制度候補整理", source_text, summary_text, extra_instruction, model)
-                    st.success("制度候補整理AIを保存しました。AI要約メモにも表示されます。")
+                        save_ai_summary(case_id, client_id, "カード整理AI｜生活制度候補整理", source_text, summary_text, extra_instruction, model)
+                    st.success("生活制度候補整理AIを保存しました。AI要約メモにも表示されます。")
                     st.rerun()
                 except Exception as e:
-                    st.error("制度候補整理AIの作成に失敗しました。")
+                    st.error("生活制度候補整理AIの作成に失敗しました。")
                     st.exception(e)
 
         df_ai = fetch_df("""
             SELECT summary_id, created_at, summary_type, summary_text, memo
             FROM ai_summaries
-            WHERE case_id=%(case_id)s AND summary_type='カード整理AI｜制度候補整理'
+            WHERE case_id=%(case_id)s AND summary_type='カード整理AI｜生活制度候補整理'
             ORDER BY created_at DESC
         """, {"case_id": case_id})
         if df_ai.empty:
-            st.info("保存済みの制度候補整理AIはありません。")
+            st.info("保存済みの生活制度候補整理AIはありません。")
         else:
             for _, row in df_ai.iterrows():
-                with st.expander(f"{row.get('created_at','')}｜制度候補整理AI", expanded=False):
+                with st.expander(f"{row.get('created_at','')}｜生活制度候補整理AI", expanded=False):
                     st.markdown(row.get("summary_text", ""))
 
     with tab3:
-        st.markdown("### 登録済み制度候補")
+        st.markdown("### 登録済み生活制度候補")
         df = fetch_df("""
             SELECT policy_id, created_at, updated_at, category, policy_name, status, priority,
                    municipality, trigger_words, reason, check_items, caution, next_action,
@@ -3034,10 +3182,10 @@ def render_policy_candidates():
             row = df[df["policy_id"] == selected].iloc[0]
             with st.form("policy_edit"):
                 category = st.selectbox("制度カテゴリ", POLICY_CATEGORY_OPTIONS, index=POLICY_CATEGORY_OPTIONS.index(row["category"]) if row["category"] in POLICY_CATEGORY_OPTIONS else 0)
-                policy_name = st.text_input("制度名・候補名", normalize_text(row["policy_name"]))
+                policy_name = st.text_input("制度・支援・手続き候補名", normalize_text(row["policy_name"]))
                 status = st.selectbox("状態", POLICY_STATUS_OPTIONS, index=POLICY_STATUS_OPTIONS.index(row["status"]) if row["status"] in POLICY_STATUS_OPTIONS else 0)
                 priority = st.selectbox("確認優先度", POLICY_PRIORITY_OPTIONS, index=POLICY_PRIORITY_OPTIONS.index(row["priority"]) if row["priority"] in POLICY_PRIORITY_OPTIONS else 1)
-                municipality = st.text_input("自治体・確認先", normalize_text(row["municipality"]))
+                municipality = st.text_input("自治体・支援先・専門職確認先", normalize_text(row["municipality"]))
                 trigger_words = st.text_input("候補になった言葉", normalize_text(row["trigger_words"]))
                 reason = st.text_area("候補になる理由", normalize_text(row["reason"]))
                 check_items = st.text_area("次回確認事項", normalize_text(row["check_items"]))
@@ -3046,7 +3194,7 @@ def render_policy_candidates():
                 official_confirmed = st.checkbox("公式要綱・自治体窓口で確認済み", value=bool(row.get("official_confirmed", 0)))
                 official_url = st.text_input("公式URL・参照先メモ", normalize_text(row["official_url"]))
                 memo = st.text_area("内部メモ", normalize_text(row["memo"]))
-                delete_confirm = st.checkbox("この制度候補を削除することを確認しました。")
+                delete_confirm = st.checkbox("この生活制度候補を削除することを確認しました。")
                 delete_text = st.text_input("削除する場合は DELETE と入力", key="policy_delete_text")
                 c1, c2 = st.columns(2)
                 update = c1.form_submit_button("更新する")
@@ -3079,7 +3227,7 @@ def render_policy_candidates():
                     "policy_id": selected,
                 })
                 log_action("update", "policy_candidates", selected, "制度候補更新")
-                st.success("制度候補を更新しました。")
+                st.success("生活生活制度候補を更新しました。")
                 st.rerun()
             if delete:
                 if not delete_confirm or delete_text != "DELETE":
@@ -3087,7 +3235,7 @@ def render_policy_candidates():
                 else:
                     execute("DELETE FROM policy_candidates WHERE policy_id=%(policy_id)s", {"policy_id": selected})
                     log_action("delete", "policy_candidates", selected, "制度候補削除")
-                    st.success("制度候補を削除しました。")
+                    st.success("生活生活制度候補を削除しました。")
                     st.rerun()
 
 def render_ai_summary():
@@ -3127,7 +3275,7 @@ def render_ai_summary():
             "カード整理AI｜初回整理",
             "カード整理AI｜次回確認",
             "カード整理AI｜保留事項整理",
-            "カード整理AI｜制度候補整理",
+            "カード整理AI｜生活制度候補整理",
             "カード整理AI｜家族共有前整理",
             "カード整理AI｜内部メモ",
             "カード整理AI｜相談者向けやわらか要約",
@@ -4220,7 +4368,7 @@ NYANTOMO_V2_MENUS = [
     "Ver2.0｜カードOS俯瞰",
     "Ver2.0｜カード整理",
     "Ver2.0｜保留事項管理",
-    "Ver3.3｜制度候補整理",
+    "Ver3.4｜生活制度候補整理",
 ]
 for m in NYANTOMO_V2_MENUS:
     if m not in available_menus:
@@ -4269,7 +4417,7 @@ elif menu == "Ver2.0｜カード整理":
     render_consultation_cards()
 elif menu == "Ver2.0｜保留事項管理":
     render_pending_items()
-elif menu == "Ver3.3｜制度候補整理":
+elif menu == "Ver3.4｜生活制度候補整理":
     render_policy_candidates()
 elif menu == "空き家カード":
     related_card_page("properties", "property_id", "空き家カード", [
