@@ -4734,30 +4734,300 @@ def build_nyantomo_assistant_prompt(mode, user_question, source_text):
 """.strip()
 
 
+
+def _assistant_pick_lines(source_text, keywords, max_lines=8):
+    """内部記録からキーワードに合う行を抜き出す。AIなしでも実用的に動くための簡易抽出。"""
+    source_text = normalize_text(source_text)
+    picked = []
+    seen = set()
+    for raw in source_text.splitlines():
+        line = normalize_text(raw)
+        if not line or len(line) < 2:
+            continue
+        if any(k in line for k in keywords):
+            key = line[:180]
+            if key not in seen:
+                picked.append(line)
+                seen.add(key)
+        if len(picked) >= max_lines:
+            break
+    return picked
+
+
+def _assistant_bullets(lines, empty_text="記録上は明確な記載がありません。"):
+    if not lines:
+        return f"- {empty_text}"
+    return "\n".join([f"- {x}" for x in lines])
+
+
+def _assistant_detect_policy_candidates(text_value, max_items=6):
+    """POLICY_CANDIDATE_TEMPLATESから候補を抽出。断定ではなく確認候補として返す。"""
+    text_value = normalize_text(text_value)
+    found = []
+    for category, tpl in POLICY_CANDIDATE_TEMPLATES.items():
+        kws = tpl.get("keywords", [])
+        hit_words = [k for k in kws if k and k in text_value]
+        if hit_words:
+            found.append((category, hit_words, tpl))
+    return found[:max_items]
+
+
+def _assistant_common_sections(source_text):
+    visible = _assistant_pick_lines(
+        source_text,
+        ["client_name", "case_title", "status", "現在", "状態", "相談", "案件", "心配", "猫", "住まい", "家族", "保留", "次回", "未確認"],
+        max_lines=12,
+    )
+    pending = _assistant_pick_lines(
+        source_text,
+        ["not_decide", "今は決めない", "保留", "pending", "判断保留", "急がない"],
+        max_lines=8,
+    )
+    unknown = _assistant_pick_lines(
+        source_text,
+        ["未確認", "ヒアリング漏れ", "next_hearing", "unknown", "確認事項", "要確認", "聞く"],
+        max_lines=8,
+    )
+    nexts = _assistant_pick_lines(
+        source_text,
+        ["next_check", "次回", "次の対応", "next_action", "確認日"],
+        max_lines=8,
+    )
+    cautions = _assistant_pick_lines(
+        source_text,
+        ["注意", "caution", "do_not", "今やらない", "専門職", "弁護士", "司法書士", "税理士", "医療", "登記"],
+        max_lines=8,
+    )
+    return visible, pending, unknown, nexts, cautions
+
+
 def build_local_assistant_answer(mode, user_question, source_text):
-    """APIキー未設定時の簡易整理。AI生成ではないが、検索結果の確認用に使える。"""
-    return f"""## 1. まず見えていること
-OpenAI APIキーが未設定のため、AI文章生成は行っていません。下の内部記録をもとに、案件・履歴・カードを確認してください。
+    """
+    OpenAI APIキー未設定時でも、メニューごとの機能が実際に動くようにするローカル整理。
+    生成AIではなく、DB内の相談記録・カード・保留・制度候補の抽出と定型整形を行います。
+    """
+    mode = normalize_text(mode)
+    user_question = normalize_text(user_question)
+    source_text = normalize_text(source_text)
+    visible, pending, unknown, nexts, cautions = _assistant_common_sections(source_text)
+    policy_hits = _assistant_detect_policy_candidates(user_question + "\n" + source_text)
 
-## 2. 保留してよいこと
-記録上の「今は決めないこと」「保留事項」「判断保留カード」を確認してください。
+    if mode == "次回確認事項抽出":
+        return f"""## 1. 次回確認の候補
+{_assistant_bullets(nexts + unknown, "次回確認として明確に書かれた項目はまだ少ないです。")}
 
-## 3. 未確認のこと
-「ヒアリング漏れ」「次回ヒアリング項目」「未確認事項」を確認してください。
+## 2. 優先して聞くとよいこと
+- 相談者本人が、今いちばん気になっていること
+- 猫・住まい・家族・お金のうち、どれが先に不安になっているか
+- 今すぐ決めたいことではなく、今は決めなくてよいこと
+- 連絡してよい家族・支援者・専門職の範囲
+- 次回までに確認できそうな資料や写真
 
-## 4. 次回確認
-「次回確認」「次回確認日」「相談履歴の次の対応」を確認してください。
+## 3. 保留してよいこと
+{_assistant_bullets(pending, "結論を急ぐ必要がある記録は見当たりません。")}
 
-## 5. にゃんともとしての関わり方
-判断を急がせず、記録・整理・保留・次回確認の範囲で扱うのが安全です。
-
-## 6. 注意点
-法律・医療・税務・登記・強い不動産判断は、必要に応じて専門職確認候補として分けてください。
+## 4. 注意点
+{_assistant_bullets(cautions, "断定せず、必要に応じて専門職・自治体確認に分けてください。")}
 
 ---
-### 参照内部記録
-{source_text[:12000]}
+### 参照した内部記録の抜粋
+{source_text[:6000]}
 """.strip()
+
+    if mode == "制度候補整理":
+        if policy_hits:
+            blocks = []
+            for category, hit_words, tpl in policy_hits:
+                domain = POLICY_CATEGORY_DOMAIN_MAP.get(category, "横断・その他")
+                blocks.append(f"""### {category}（{domain}）
+- 反応した言葉：{", ".join(hit_words)}
+- 確認すること：{tpl.get("check_items", "")}
+- 注意点：{tpl.get("caution", "")}
+- 次の一手：{tpl.get("next_action", "")}""")
+            candidate_text = "\n\n".join(blocks)
+        else:
+            candidate_text = "- 記録上、強く反応する制度候補はまだ見つかりません。まず所在地・本人意思・猫・住まい・家族関係を整理してください。"
+        return f"""## 1. 制度・支援の確認候補
+{candidate_text}
+
+## 2. まだ断定しないこと
+- 制度が使えるかどうか
+- 申請対象になるかどうか
+- 後見・信託・遺言・売却・賃貸などの必要性
+- 補助金や支援制度の最新条件
+
+## 3. 次回確認
+{_assistant_bullets(unknown + nexts, "所在地・所有者・本人意思・緊急度を次回確認候補にしてください。")}
+
+## 4. にゃんともとしての関わり方
+制度を結論として出すのではなく、相談者が急がず考えられるように「確認候補」として横に置きます。
+
+## 5. 注意点
+{POLICY_DISCLAIMER}
+
+---
+### 参照した内部記録の抜粋
+{source_text[:6000]}
+""".strip()
+
+    if mode == "面談メモ作成":
+        return f"""# 面談前メモ
+
+## 1. 今日の主テーマ
+{_assistant_bullets(visible[:5], "テーマは未確定です。冒頭で相談者の言葉をそのまま確認してください。")}
+
+## 2. 先に安心してもらう一言
+- 今日は結論を出す場ではなく、今ある不安を一緒に並べる時間です。
+- 決めることより、まだ決めなくてよいことを見つけることも大切です。
+
+## 3. 聞くこと
+{_assistant_bullets(unknown + nexts, "猫・住まい・家族・お金・支援者を順番に確認してください。")}
+
+## 4. 急がないこと
+{_assistant_bullets(pending, "売却・賃貸・後見・信託などの結論は、情報が揃うまで保留できます。")}
+
+## 5. 面談後に残す記録
+- 相談者の言葉
+- 未確認事項
+- 保留してよいこと
+- 次回確認日
+- 必要なら制度候補
+
+## 6. 注意点
+{_assistant_bullets(cautions, "越境判断を避け、必要時は専門職確認に分けます。")}
+""".strip()
+
+    if mode == "HP記事下書き":
+        return f"""# HP記事下書き
+
+## 解決を、急がなくていい。
+
+住まいのこと、猫のこと、これからの暮らしのこと。
+
+一度に考えようとすると、何から手をつけてよいのか分からなくなることがあります。実家や空き家のこと、高齢になってからの住まい、猫の世話、家族との温度差。どれも大切だからこそ、すぐに答えを出せないのは自然なことです。
+
+にゃんとも 住まいと猫の相談室では、まず状況を一緒に整理します。
+
+売る、貸す、預ける、制度を使う。そうした選択肢を急いで決める前に、今見えていること、まだ分からないこと、しばらく保留してよいことを分けていきます。
+
+大切なのは、何もしないことではありません。
+
+急がずに置いておくために、記録し、確認し、必要なときに動ける形にしておくことです。
+
+猫と暮らす人の判断の時間を守るために、にゃんともは、固い現実に少しだけクッションを置く相談室でありたいと思っています。
+
+まずは、今気になっていることを一緒に並べるところから始めませんか。
+
+---
+※この下書きは個人情報を含まない一般記事として整えています。公開前に地域名・料金・導線を必要に応じて追記してください。
+""".strip()
+
+    if mode == "note記事下書き":
+        return f"""# note記事下書き
+
+夕方になると、猫はいつもの場所で待っています。
+
+玄関の音、台所の気配、いつもの声。
+人の暮らしの中に、猫の時間は静かに重なっています。
+
+けれど、親の入院、実家の空き家、相続、施設入所。
+そうした出来事が急に近づいてくると、猫のことも、住まいのことも、家族のことも、一度に考えなければならないように感じます。
+
+でも本当は、すぐに全部を決めなくてもいいのだと思います。
+
+大切なのは、放置することではなく、今は決めなくてよいことを分けておくこと。
+分からないことを、分からないまま安全に置いておくこと。
+そして、必要なときに確認できるように、言葉にして残しておくこと。
+
+にゃんともが大切にしたいのは、猫と暮らす人の判断の時間です。
+
+売るか、貸すか。
+預けるか、引き取るか。
+制度を使うか、まだ使わないか。
+
+その答えの前に、その人の心が追いつく時間が必要なことがあります。
+
+解決を、急がなくていい。
+
+そう言える場所がひとつあるだけで、暮らしの中の猫も、人も、少しだけ息がしやすくなるのかもしれません。
+
+---
+開業準備中の小さな相談室として、猫と暮らす人のこれからを、少しずつ整えています。
+""".strip()
+
+    if mode == "自由相談":
+        return f"""## 1. 質問への整理
+「{user_question}」について、内部記録から確認できる範囲で整理します。
+
+## 2. まず見えていること
+{_assistant_bullets(visible, "関連しそうな記録は多くありません。検索語や対象案件を変えると見つかる可能性があります。")}
+
+## 3. 保留してよいこと
+{_assistant_bullets(pending)}
+
+## 4. 未確認のこと
+{_assistant_bullets(unknown)}
+
+## 5. 次回確認
+{_assistant_bullets(nexts)}
+
+## 6. 注意点
+{_assistant_bullets(cautions)}
+""".strip()
+
+    # 案件確認（デフォルト）
+    return f"""## 1. まず見えていること
+{_assistant_bullets(visible, "関連する案件記録はまだ十分に見つかっていません。")}
+
+## 2. 保留してよいこと
+{_assistant_bullets(pending, "記録上、明確な保留事項はまだ少ないです。")}
+
+## 3. 未確認のこと
+{_assistant_bullets(unknown, "未確認事項はまだ整理されていません。")}
+
+## 4. 次回確認
+{_assistant_bullets(nexts, "次回確認日は未設定、または記録上見つかりません。")}
+
+## 5. にゃんともとしての関わり方
+- まず相談者の言葉をそのまま残す
+- 猫・住まい・家族・お金・制度をカードに分ける
+- 決めることより、決めなくてよいことを見つける
+- 必要な時だけ制度・専門職・地域資源につなぐ
+
+## 6. 注意点
+{_assistant_bullets(cautions, "法律・医療・税務・登記・強い不動産判断は断定せず、確認候補として扱ってください。")}
+
+---
+### 参照した内部記録の抜粋
+{source_text[:6000]}
+""".strip()
+
+
+def save_assistant_answer_to_history(case_id, mode, answer_text):
+    """アシスタント整理結果を相談履歴へ保存する。"""
+    if not case_id:
+        return False, "対象案件が指定されていません。"
+    client_id = case_to_client(case_id)
+    history_id = make_id("hist")
+    execute("""
+        INSERT INTO history
+        (history_id, case_id, client_id, created_at, record_date, record_type, record, next_action, internal_memo)
+        VALUES (%(history_id)s, %(case_id)s, %(client_id)s, %(created_at)s, %(record_date)s, %(record_type)s, %(record)s, %(next_action)s, %(internal_memo)s)
+    """, {
+        "history_id": history_id,
+        "case_id": case_id,
+        "client_id": client_id,
+        "created_at": now_text(),
+        "record_date": today_text(),
+        "record_type": "内部メモ",
+        "record": f"にゃんともアシスタント整理結果（{mode}）",
+        "next_action": "",
+        "internal_memo": answer_text,
+    })
+    execute("UPDATE cases SET updated_at=%(updated_at)s WHERE case_id=%(case_id)s", {"updated_at": now_text(), "case_id": case_id})
+    log_action("create", "history", history_id, f"アシスタント結果を相談履歴へ保存：{mode}")
+    clear_app_cache()
+    return True, "相談履歴に保存しました。"
 
 
 def render_nyantomo_assistant():
@@ -4785,6 +5055,7 @@ def render_nyantomo_assistant():
     mode = st.selectbox("モード", ASSISTANT_MODE_OPTIONS)
     selected_label = st.selectbox("対象案件", case_labels)
     selected_case_id = "" if selected_label == "指定しない（全体から検索）" else case_map.get(selected_label, "")
+    st.session_state["nyantomo_assistant_selected_case_id"] = selected_case_id
 
     default_question = "Aさんの案件どうだっけ？" if not selected_case_id else "この案件の現在地と次回確認事項を整理して"
     user_question = st.text_area("質問・指示", value=default_question, height=100)
@@ -4816,6 +5087,7 @@ def render_nyantomo_assistant():
             st.session_state["nyantomo_assistant_last_answer"] = answer_text
             st.session_state["nyantomo_assistant_last_source"] = source_text
             st.session_state["nyantomo_assistant_last_mode"] = mode
+            st.session_state["nyantomo_assistant_last_case_id"] = selected_case_id
             clear_app_cache()
 
     if st.session_state.get("nyantomo_assistant_last_answer"):
@@ -4827,6 +5099,18 @@ def render_nyantomo_assistant():
             file_name=f"nyantomo_assistant_{today_text()}.md",
             mime="text/markdown",
         )
+        last_case_id = st.session_state.get("nyantomo_assistant_last_case_id", "")
+        if last_case_id and can_write():
+            if st.button("この整理結果を相談履歴に保存する"):
+                ok, msg = save_assistant_answer_to_history(
+                    last_case_id,
+                    st.session_state.get("nyantomo_assistant_last_mode", ""),
+                    st.session_state.get("nyantomo_assistant_last_answer", ""),
+                )
+                if ok:
+                    st.success(msg)
+                else:
+                    st.warning(msg)
         if show_source:
             st.markdown("### 参照した内部記録")
             st.text_area("内部記録", st.session_state.get("nyantomo_assistant_last_source", ""), height=360)
