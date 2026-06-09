@@ -5,6 +5,7 @@ import hmac
 import os
 import json
 import html
+import calendar
 from datetime import date, datetime
 from io import BytesIO
 import zipfile
@@ -456,6 +457,46 @@ def date_or_none(value):
     except Exception:
         return None
 
+
+
+def ymd_selectbox_date(label, default=None, start_year=1900, end_year=None, key_prefix="ymd"):
+    """
+    生年月日など、古い年月日を入力しやすくするための年月日分割入力。
+    Streamlit の date_input は年移動がしにくいため、後見対象者の生年月日はこの方式を使います。
+    戻り値は datetime.date または None。
+    """
+    end_year = end_year or date.today().year
+    default_date = date_or_none(default)
+
+    year_options = ["未選択"] + list(range(end_year, start_year - 1, -1))
+    if default_date and start_year <= default_date.year <= end_year:
+        year_index = year_options.index(default_date.year)
+    else:
+        year_index = 0
+
+    y_col, m_col, d_col = st.columns(3)
+    with y_col:
+        year = st.selectbox(f"{label}（年）", year_options, index=year_index, key=f"{key_prefix}_year")
+
+    if year == "未選択":
+        with m_col:
+            st.selectbox(f"{label}（月）", ["未選択"], key=f"{key_prefix}_month_disabled")
+        with d_col:
+            st.selectbox(f"{label}（日）", ["未選択"], key=f"{key_prefix}_day_disabled")
+        return None
+
+    month_options = list(range(1, 13))
+    month_index = (default_date.month - 1) if default_date and default_date.year == year else 0
+    with m_col:
+        month = st.selectbox(f"{label}（月）", month_options, index=month_index, key=f"{key_prefix}_month")
+
+    max_day = calendar.monthrange(int(year), int(month))[1]
+    day_options = list(range(1, max_day + 1))
+    day_index = (default_date.day - 1) if default_date and default_date.year == year and default_date.month == month and default_date.day <= max_day else 0
+    with d_col:
+        day = st.selectbox(f"{label}（日）", day_options, index=day_index, key=f"{key_prefix}_day")
+
+    return date(int(year), int(month), int(day))
 
 def can_write():
     return st.session_state.get("role") in [ADMIN_ROLE, STAFF_ROLE]
@@ -3677,7 +3718,7 @@ def render_guardian_wards():
         c1, c2 = st.columns(2)
         with c1:
             name = st.text_input("氏名")
-            birth_date = st.date_input("生年月日", value=None)
+            birth_date = ymd_selectbox_date("生年月日", default=None, start_year=1900, key_prefix="guardian_birth_create")
             address = st.text_area("住所")
             phone = st.text_input("電話番号")
             facility_name = st.text_input("施設名")
@@ -3725,6 +3766,8 @@ def render_guardian_wards():
         selected = st.selectbox("更新する被後見人ID", df["ward_id"].tolist())
         row = df[df["ward_id"] == selected].iloc[0]
         with st.form("guardian_ward_edit"):
+            new_birth_date = ymd_selectbox_date("生年月日", default=row.get("birth_date", None), start_year=1900, key_prefix="guardian_birth_edit")
+            new_start_date = st.date_input("担当開始日", date_or_none(row.get("start_date", None)))
             new_status = st.selectbox("状態", GUARDIAN_STATUS_OPTIONS, index=GUARDIAN_STATUS_OPTIONS.index(row["status"]) if row["status"] in GUARDIAN_STATUS_OPTIONS else 0)
             new_emergency = st.selectbox("緊急度", EMERGENCY_OPTIONS, index=EMERGENCY_OPTIONS.index(row["emergency_level"]) if row["emergency_level"] in EMERGENCY_OPTIONS else 0)
             new_next = st.date_input("次回確認日", date_or_none(row["next_check_date"]))
@@ -3733,9 +3776,9 @@ def render_guardian_wards():
         if update:
             execute("""
                 UPDATE guardian_wards
-                SET updated_at=%(updated_at)s, status=%(status)s, emergency_level=%(emergency_level)s, next_check_date=%(next_check_date)s, memo=%(memo)s
+                SET updated_at=%(updated_at)s, birth_date=%(birth_date)s, start_date=%(start_date)s, status=%(status)s, emergency_level=%(emergency_level)s, next_check_date=%(next_check_date)s, memo=%(memo)s
                 WHERE ward_id=%(ward_id)s
-            """, {"updated_at": now_text(), "status": new_status, "emergency_level": new_emergency, "next_check_date": new_next, "memo": new_memo, "ward_id": selected})
+            """, {"updated_at": now_text(), "birth_date": new_birth_date, "start_date": new_start_date, "status": new_status, "emergency_level": new_emergency, "next_check_date": new_next, "memo": new_memo, "ward_id": selected})
             log_action("update", "guardian_wards", selected, "被後見人更新")
             st.success("更新しました。")
             st.rerun()
