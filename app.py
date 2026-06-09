@@ -3026,9 +3026,61 @@ def render_card_os_overview():
 # Ver3.4：生活制度候補整理
 # ============================================================
 
+def build_policy_section_text(case_id):
+    """
+    生活制度候補整理だけを、AIに渡しやすいテキストへ変換します。
+    build_case_ai_source() 側の取得結果が古く見える場合でも、
+    ここで policy_candidates を直接読み直して、登録済み候補を確実に反映します。
+    """
+    try:
+        df = fetch_df("""
+            SELECT category, policy_name, status, priority, municipality, trigger_words,
+                   reason, check_items, caution, next_action, official_confirmed, official_url, memo,
+                   created_at, updated_at
+            FROM policy_candidates
+            WHERE case_id=%(case_id)s
+            ORDER BY updated_at DESC NULLS LAST, created_at DESC
+        """, {"case_id": case_id})
+    except Exception as e:
+        return f"\n■ Ver3.4生活制度候補整理\n取得エラー:{e}"
+
+    lines = ["\n■ Ver3.4生活制度候補整理"]
+    if df is None or df.empty:
+        lines.append("未登録")
+        return "\n".join(lines)
+
+    for _, r in df.iterrows():
+        parts = []
+        for col in [
+            "category", "policy_name", "status", "priority", "municipality", "trigger_words",
+            "reason", "check_items", "caution", "next_action", "official_confirmed", "official_url", "memo"
+        ]:
+            value = normalize_text(r.get(col, ""))
+            if value:
+                parts.append(f"{col}:{value}")
+        if parts:
+            lines.append("- " + "／".join(parts))
+    return "\n".join(lines)
+
+
+def replace_policy_section(source_text, policy_section):
+    """
+    build_case_ai_source()内の『Ver3.4生活制度候補整理』欄を、
+    最新のpolicy_candidates取得結果で差し替えます。
+    """
+    import re
+    source_text = normalize_text(source_text)
+    pattern = r"\n■ Ver3\.4生活制度候補整理\n.*?(?=\n■ |\Z)"
+    if re.search(pattern, source_text, flags=re.S):
+        return re.sub(pattern, policy_section, source_text, flags=re.S)
+    return (source_text + policy_section).strip()
+
+
 def build_policy_source_text(case_id):
-    """制度候補整理用に案件情報と関連カードをまとめる。"""
-    return build_case_ai_source(case_id)
+    """制度候補整理用に、案件情報と登録済み生活制度候補を必ず反映してまとめる。"""
+    base_text = build_case_ai_source(case_id)
+    latest_policy_section = build_policy_section_text(case_id)
+    return replace_policy_section(base_text, latest_policy_section)
 
 
 def suggest_policy_candidates_from_text(source_text):
@@ -3220,7 +3272,7 @@ def render_policy_candidates():
                 "official_url": official_url,
                 "memo": memo,
             })
-            st.success("生活生活制度候補を登録しました。")
+            st.success("生活制度候補を登録しました。")
             clear_app_cache()
             st.rerun()
 
