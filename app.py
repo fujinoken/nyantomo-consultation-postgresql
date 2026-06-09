@@ -6,6 +6,7 @@ import os
 import json
 import html
 import calendar
+import re
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 from io import BytesIO
@@ -4536,11 +4537,15 @@ def render_users():
 
 ASSISTANT_MODE_OPTIONS = [
     "案件確認",
+    "案件横断検索",
     "次回確認事項抽出",
+    "次回確認ダッシュボード",
     "制度候補整理",
+    "制度候補推薦",
     "面談メモ作成",
     "HP記事下書き",
     "note記事下書き",
+    "note自動生成",
     "自由相談",
 ]
 
@@ -4657,6 +4662,266 @@ def search_assistant_related_cases(query, limit=8):
     """, {"pattern": pattern, "limit": limit})
 
 
+
+
+def _assistant_expand_query_terms(query):
+    """にゃんとも用の横断検索語を少し広げる。"""
+    q = normalize_text(query)
+    terms = []
+    if q:
+        terms.append(q)
+    expansion_map = {
+        "猫": ["猫", "ペット", "預かり", "引き取り", "動物病院", "ペット信託", "世話"],
+        "猫の将来": ["猫", "ペット信託", "預かり", "引き取り", "世話人", "動物病院", "もしもの時"],
+        "空き家": ["空き家", "実家", "住まい", "見守り", "管理", "売却", "賃貸"],
+        "後見": ["後見", "任意後見", "見守り契約", "判断能力", "認知症"],
+        "相続": ["相続", "遺言", "遺産分割", "戸籍", "相続人"],
+        "制度": ["制度", "補助", "助成", "申請", "包括", "介護保険", "住宅改修"],
+        "次回": ["次回", "確認", "未確認", "ヒアリング", "要確認"],
+    }
+    for key, values in expansion_map.items():
+        if key in q:
+            terms.extend(values)
+    # 重複を残さない
+    seen = set()
+    result = []
+    for t in terms:
+        t = normalize_text(t)
+        if t and t not in seen:
+            result.append(t)
+            seen.add(t)
+    return result or [""]
+
+
+def search_assistant_cases_by_terms(query, limit=30):
+    """
+    A. 案件横断検索
+    質問語を少し広げて、案件・履歴・カード・保留・制度候補を横断検索する。
+    """
+    terms = _assistant_expand_query_terms(query)
+    if not terms or terms == [""]:
+        return search_assistant_related_cases("", limit=limit)
+
+    where_parts = []
+    params = {"limit": limit}
+    search_cols = [
+        "cl.name", "cl.area", "cl.note",
+        "c.case_title", "c.case_type", "c.status", "c.current_state", "c.house_state",
+        "c.cat_relation", "c.family_gap", "c.pressure", "c.worries", "c.not_decide",
+        "c.next_check", "c.next_hearing_items", "c.hearing_missing", "c.do_not_do_now",
+        "h.record", "h.next_action", "h.internal_memo",
+        "cc.card_type", "cc.concern", "cc.client_words", "cc.current_state", "cc.unknown_items", "cc.next_check_items",
+        "p.theme", "p.reason", "p.caution", "p.memo",
+        "pc.category", "pc.policy_name", "pc.reason", "pc.check_items", "pc.next_action",
+        "cat.cat_name", "cat.health_memo", "cat.life_status", "cat.future_plan",
+        "prop.property_name", "prop.address", "prop.property_status", "prop.vacant_status",
+        "fam.name", "fam.relation", "fam.temperature", "fam.memo"
+    ]
+    for i, term in enumerate(terms[:8]):
+        key = f"p{i}"
+        params[key] = f"%{term}%"
+        where_parts.append("(" + " OR ".join([f"{col} ILIKE %({key})s" for col in search_cols]) + ")")
+
+    sql = f"""
+        SELECT DISTINCT c.case_id, c.client_id, cl.name AS client_name, c.case_title, c.case_type, c.status,
+               c.current_state, c.cat_relation, c.house_state, c.family_gap, c.worries,
+               c.not_decide, c.next_check, c.next_check_date, c.updated_at
+        FROM cases c
+        JOIN clients cl ON c.client_id = cl.client_id
+        LEFT JOIN history h ON h.case_id = c.case_id
+        LEFT JOIN consultation_cards cc ON cc.case_id = c.case_id
+        LEFT JOIN pending_items p ON p.case_id = c.case_id
+        LEFT JOIN policy_candidates pc ON pc.case_id = c.case_id
+        LEFT JOIN cats cat ON cat.case_id = c.case_id
+        LEFT JOIN properties prop ON prop.case_id = c.case_id
+        LEFT JOIN family fam ON fam.case_id = c.case_id
+        WHERE {" OR ".join(where_parts)}
+        ORDER BY c.updated_at DESC NULLS LAST, c.created_at DESC
+        LIMIT %(limit)s
+    """
+    return fetch_df(sql, params)
+
+
+def get_assistant_due_cases(days=7):
+    """
+    B. 次回確認ダッシュボード
+    期限超過・指定日数以内・ヒアリング漏れ・今やらない方がいいことをまとめて取得する。
+    """
+    return fetch_df("""
+        SELECT cl.name AS client_name, c.case_id, c.client_id, c.case_title, c.case_type, c.status,
+               c.next_check_date, c.next_check, c.next_hearing_items, c.hearing_missing,
+               c.do_not_do_now, c.not_decide, c.updated_at,
+               CASE
+                 WHEN c.next_check_date IS NULL THEN '日付未設定'
+                 WHEN c.next_check_date < ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Tokyo')::date) THEN '期限超過'
+                 WHEN c.next_check_date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Tokyo')::date + (%(days)s || ' days')::interval) THEN '近日確認'
+                 ELSE '今後確認'
+               END AS check_status
+        FROM cases c
+        JOIN clients cl ON c.client_id = cl.client_id
+        WHERE COALESCE(c.status,'') <> '終了'
+          AND (
+              c.next_check_date IS NOT NULL
+              OR NULLIF(TRIM(COALESCE(c.hearing_missing,'')), '') IS NOT NULL
+              OR NULLIF(TRIM(COALESCE(c.next_hearing_items,'')), '') IS NOT NULL
+              OR NULLIF(TRIM(COALESCE(c.do_not_do_now,'')), '') IS NOT NULL
+          )
+        ORDER BY
+          CASE
+            WHEN c.next_check_date IS NULL THEN 3
+            WHEN c.next_check_date < ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Tokyo')::date) THEN 0
+            WHEN c.next_check_date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Tokyo')::date + (%(days)s || ' days')::interval) THEN 1
+            ELSE 2
+          END,
+          c.next_check_date ASC NULLS LAST,
+          c.updated_at DESC
+        LIMIT 100
+    """, {"days": int(days)})
+
+
+def recommend_policy_candidates_from_text(text_value, max_items=12):
+    """
+    C. 制度候補推薦
+    既存のPOLICY_CANDIDATE_TEMPLATESを使い、案件記録から制度・支援候補を出す。
+    """
+    text_value = normalize_text(text_value)
+    rows = []
+    for category, tpl in POLICY_CANDIDATE_TEMPLATES.items():
+        hit_words = [k for k in tpl.get("keywords", []) if k and k in text_value]
+        if hit_words:
+            rows.append({
+                "領域": POLICY_CATEGORY_DOMAIN_MAP.get(category, "横断・その他"),
+                "候補": category,
+                "反応語": "、".join(hit_words[:8]),
+                "確認事項": tpl.get("check_items", ""),
+                "注意点": tpl.get("caution", ""),
+                "次の一手": tpl.get("next_action", ""),
+            })
+    return rows[:max_items]
+
+
+def build_policy_recommendation_text(source_text):
+    rows = recommend_policy_candidates_from_text(source_text)
+    if not rows:
+        return "記録上、強く反応する制度候補はまだ見つかりません。所在地・本人意思・猫・住まい・家族関係を先に整理してください。"
+    blocks = []
+    for r in rows:
+        blocks.append(f"""### {r['候補']}（{r['領域']}）
+- 反応語：{r['反応語']}
+- 確認事項：{r['確認事項']}
+- 注意点：{r['注意点']}
+- 次の一手：{r['次の一手']}""")
+    return "\n\n".join(blocks)
+
+
+def anonymize_for_note(text_value):
+    """D. note自動生成用の簡易匿名化。相談者名やIDを直接出さない。"""
+    t = normalize_text(text_value)
+    # ID系・電話番号・メールっぽい文字列を削る
+    t = re.sub(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", "（メール省略）", t)
+    t = re.sub(r"\b0\d{1,4}[-ー]?\d{1,4}[-ー]?\d{3,4}\b", "（電話番号省略）", t)
+    t = re.sub(r"(client|case|hist|cat|property|family|card|pending|policy)_[0-9a-fA-F]{6,}", "（ID省略）", t)
+    # よく出るラベルは一般化
+    t = re.sub(r"client_name[:：][^\n／]+", "client_name:ある相談者", t)
+    t = re.sub(r"case_title[:：][^\n／]+", "case_title:ある相談", t)
+    return t
+
+
+def build_note_draft_from_case(source_text, user_question=""):
+    """案件整理→匿名化→note下書き。にゃんとも文体寄りのローカル生成。"""
+    safe_source = anonymize_for_note(source_text)
+    visible, pending, unknown, nexts, cautions = _assistant_common_sections(safe_source)
+    seed = "\n".join(visible[:5] + pending[:3] + unknown[:3])
+    return f"""# note下書き｜解決を急がないために、まず置いておく
+
+夕方の部屋に、猫の気配だけが静かに残っていることがあります。
+
+誰かの入院。
+実家の空き家。
+相続のこと。
+これからの住まい。
+そして、家で待っている猫のこと。
+
+ひとつずつなら考えられることも、同時に重なると、急に大きな問題に見えてしまいます。
+
+今回の相談でも、最初から何かを決めるというより、まずは目の前にある不安を並べるところから始まりました。
+
+## まず見えていたこと
+
+{_assistant_bullets(visible[:6], "住まい・猫・家族・これからの暮らしが重なっていました。")}
+
+## すぐに決めなくてもよいこと
+
+{_assistant_bullets(pending[:5], "売る、貸す、預ける、制度を使う。そうした結論は、情報がそろうまで保留できます。")}
+
+## まだ確認しておきたいこと
+
+{_assistant_bullets(unknown[:5] + nexts[:3], "猫のこと、家族の希望、住まいの状態などを、次回以降に分けて確認します。")}
+
+大切なのは、急がないことと、何もしないことを分けることです。
+
+保留は、放置ではありません。
+
+大切だからこそ、すぐに結論を出さず、記録し、確認し、必要なときに動ける形にしておく。
+
+にゃんともが守りたいのは、猫と暮らす人の判断の時間です。
+
+問題そのものをすぐに消すことはできなくても、考えるための座布団をひとつ置くことはできます。
+
+解決を、急がなくていい。
+
+まずは、今ある不安を一緒に並べるところからで大丈夫です。
+
+---
+※この下書きは内部記録をもとに匿名化・一般化したものです。公開前に、個人が特定される地域名・家族構成・猫の固有名詞などが残っていないか確認してください。
+""".strip()
+
+
+def build_cross_case_search_answer(query, df):
+    if df is None or df.empty:
+        return f"""## 案件横断検索結果
+「{query}」に近い案件は見つかりませんでした。
+
+## 次に試す検索語
+- 猫
+- ペット信託
+- 預かり
+- 空き家
+- 後見
+- 相続
+- 次回確認
+"""
+    lines = [f"## 案件横断検索結果：「{query}」", ""]
+    for _, r in df.head(20).iterrows():
+        lines.append(f"""### {normalize_text(r.get('client_name',''))}｜{normalize_text(r.get('case_title',''))}
+- 状態：{normalize_text(r.get('status',''))}
+- 種別：{normalize_text(r.get('case_type',''))}
+- 猫：{normalize_text(r.get('cat_relation','')) or '記録なし'}
+- 住まい：{normalize_text(r.get('house_state','')) or '記録なし'}
+- 心配ごと：{normalize_text(r.get('worries','')) or '記録なし'}
+- 保留：{normalize_text(r.get('not_decide','')) or '記録なし'}
+- 次回確認：{normalize_text(r.get('next_check','')) or '記録なし'}（{normalize_text(r.get('next_check_date','')) or '日付未設定'}）
+""")
+    return "\n".join(lines).strip()
+
+
+def build_due_dashboard_answer(df, days=7):
+    if df is None or df.empty:
+        return f"""## 次回確認ダッシュボード
+今後{days}日以内の要確認案件、またはヒアリング漏れがある案件は見つかりませんでした。"""
+    lines = [f"## 次回確認ダッシュボード｜今後{days}日以内＋未確認あり", ""]
+    for _, r in df.head(30).iterrows():
+        lines.append(f"""### {normalize_text(r.get('check_status',''))}｜{normalize_text(r.get('client_name',''))}｜{normalize_text(r.get('case_title',''))}
+- 状態：{normalize_text(r.get('status',''))}
+- 次回確認日：{normalize_text(r.get('next_check_date','')) or '未設定'}
+- 次回確認：{normalize_text(r.get('next_check','')) or '記録なし'}
+- ヒアリング漏れ：{normalize_text(r.get('hearing_missing','')) or '記録なし'}
+- 今やらない方がいいこと：{normalize_text(r.get('do_not_do_now','')) or '記録なし'}
+""")
+    return "\n".join(lines).strip()
+
+
+
 def build_nyantomo_assistant_source(user_question, selected_case_id=""):
     """選択案件または検索結果から、AIに渡す内部コンテキストを作る。"""
     selected_case_id = normalize_text(selected_case_id)
@@ -4713,11 +4978,15 @@ def build_nyantomo_assistant_prompt(mode, user_question, source_text):
 
 モード別の出力方針：
 - 案件確認：現在状態、保留点、未確認点、次回確認、注意点を短く整理
+- 案件横断検索：条件に合う案件を一覧化し、状態・猫・住まい・保留・次回確認を比較する
 - 次回確認事項抽出：次回聞くことを3〜7個に絞り、優先順に整理
+- 次回確認ダッシュボード：期限超過・近日確認・日付未設定を分け、確認優先順位を出す
 - 制度候補整理：断定せず、確認候補・確認先・未確認条件・注意点に分ける
+- 制度候補推薦：案件記録から任意後見・ペット信託・住宅改修等の確認候補を推薦する。ただし必要性は断定しない
 - 面談メモ作成：面談前に見るA4メモ風に、テーマ・聞くこと・急がないことを整理
 - HP記事下書き：個人情報を出さず、一般化した1000字程度のHP向け本文にする
 - note記事下書き：にゃんとも文体で、情景から入り、専門知識は生活に溶かす
+- note自動生成：案件整理を匿名化・一般化し、公開前チェック付きのnote下書きを作る
 - 自由相談：質問意図に沿って、記録ベースで整理する
 
 出力形式：
@@ -4811,6 +5080,40 @@ def build_local_assistant_answer(mode, user_question, source_text):
     source_text = normalize_text(source_text)
     visible, pending, unknown, nexts, cautions = _assistant_common_sections(source_text)
     policy_hits = _assistant_detect_policy_candidates(user_question + "\n" + source_text)
+
+    if mode == "案件横断検索":
+        df = search_assistant_cases_by_terms(user_question, limit=30)
+        return build_cross_case_search_answer(user_question, df)
+
+    if mode == "次回確認ダッシュボード":
+        days = 7
+        m = re.search(r"(\d+)\s*日", user_question)
+        if m:
+            try:
+                days = max(1, min(60, int(m.group(1))))
+            except Exception:
+                days = 7
+        df = get_assistant_due_cases(days=days)
+        return build_due_dashboard_answer(df, days=days)
+
+    if mode == "制度候補推薦":
+        return f"""## 1. 制度・支援の推薦候補
+{build_policy_recommendation_text(source_text)}
+
+## 2. 推薦の扱い
+- ここで出るものは「確認候補」です。
+- 必要性・利用可否・申請可否は断定しません。
+- 本人意思、所在地、年度条件、専門職確認を分けて進めます。
+
+## 3. 次回確認
+{_assistant_bullets(unknown + nexts, "所在地・本人意思・猫の状態・住まいの状態を次回確認候補にしてください。")}
+
+## 4. 注意点
+{POLICY_DISCLAIMER}
+""".strip()
+
+    if mode == "note自動生成":
+        return build_note_draft_from_case(source_text, user_question)
 
     if mode == "次回確認事項抽出":
         return f"""## 1. 次回確認の候補
@@ -5057,8 +5360,29 @@ def render_nyantomo_assistant():
     selected_case_id = "" if selected_label == "指定しない（全体から検索）" else case_map.get(selected_label, "")
     st.session_state["nyantomo_assistant_selected_case_id"] = selected_case_id
 
-    default_question = "Aさんの案件どうだっけ？" if not selected_case_id else "この案件の現在地と次回確認事項を整理して"
-    user_question = st.text_area("質問・指示", value=default_question, height=100)
+    default_questions = {
+        "案件確認": "この案件の現在地と次回確認事項を整理して" if selected_case_id else "Aさんの案件どうだっけ？",
+        "案件横断検索": "猫の将来相談だけ見せて",
+        "次回確認事項抽出": "この案件の次回確認事項を優先順に整理して",
+        "次回確認ダッシュボード": "今後7日以内に確認が必要な案件を出して",
+        "制度候補整理": "この案件で確認候補になる制度を整理して",
+        "制度候補推薦": "この案件ならどんな制度候補がありそう？",
+        "面談メモ作成": "次回面談前に見るメモを作成して",
+        "HP記事下書き": "この相談を一般化してHP記事下書きを作って",
+        "note記事下書き": "この相談をにゃんとも文体でnote記事下書きにして",
+        "note自動生成": "この案件を匿名化してnote下書きを作って",
+        "自由相談": "記録をもとに整理して",
+    }
+    user_question = st.text_area("質問・指示", value=default_questions.get(mode, "記録をもとに整理して"), height=100)
+
+    if mode == "案件横断検索":
+        st.info("入力したテーマに近い案件を、案件・履歴・カード・保留・制度候補から横断検索します。例：猫の将来相談、空き家管理、任意後見、相続など。")
+    elif mode == "次回確認ダッシュボード":
+        st.info("期限超過・近日確認・ヒアリング漏れ・今やらない方がいいことを横断して表示します。")
+    elif mode == "制度候補推薦":
+        st.info("案件記録に含まれる言葉から制度候補を推薦します。必要性や利用可否は断定しません。")
+    elif mode == "note自動生成":
+        st.info("案件整理を匿名化・一般化してnote下書きにします。公開前に固有名詞・地域・家族構成が残っていないか確認してください。")
 
     col_a, col_b = st.columns([1, 1])
     run_ai = col_a.button("にゃんともアシスタントで整理する", type="primary")
@@ -5069,7 +5393,24 @@ def render_nyantomo_assistant():
             st.error("質問・指示を入力してください。")
             return
         with st.spinner("相談記録を探して、にゃんともアシスタントが整理しています..."):
-            source_text = build_nyantomo_assistant_source(user_question, selected_case_id)
+            if mode == "案件横断検索":
+                cross_df = search_assistant_cases_by_terms(user_question, limit=30)
+                source_text = build_cross_case_search_answer(user_question, cross_df)
+                st.session_state["nyantomo_assistant_last_table"] = cross_df
+            elif mode == "次回確認ダッシュボード":
+                days = 7
+                m = re.search(r"(\d+)\s*日", user_question)
+                if m:
+                    try:
+                        days = max(1, min(60, int(m.group(1))))
+                    except Exception:
+                        days = 7
+                due_df = get_assistant_due_cases(days=days)
+                source_text = build_due_dashboard_answer(due_df, days=days)
+                st.session_state["nyantomo_assistant_last_table"] = due_df
+            else:
+                source_text = build_nyantomo_assistant_source(user_question, selected_case_id)
+                st.session_state["nyantomo_assistant_last_table"] = pd.DataFrame()
             client_id = case_to_client(selected_case_id) if selected_case_id else ""
             if get_openai_api_key():
                 prompt = build_nyantomo_assistant_prompt(mode, user_question, source_text)
@@ -5092,6 +5433,10 @@ def render_nyantomo_assistant():
 
     if st.session_state.get("nyantomo_assistant_last_answer"):
         st.markdown("### 整理結果")
+        last_table = st.session_state.get("nyantomo_assistant_last_table")
+        if isinstance(last_table, pd.DataFrame) and not last_table.empty:
+            st.markdown("#### 抽出一覧")
+            st.dataframe(last_table, use_container_width=True, hide_index=True)
         st.markdown(st.session_state["nyantomo_assistant_last_answer"])
         st.download_button(
             "整理結果をMarkdownでダウンロード",
