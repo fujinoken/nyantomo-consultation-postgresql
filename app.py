@@ -4524,6 +4524,338 @@ def render_users():
             st.rerun()
 
 
+
+# ============================================================
+# Ver3.5：にゃんともアシスタント（常駐AI秘書）
+# ------------------------------------------------------------
+# 役割：相談履歴検索／過去案件検索／次回確認事項抽出／制度候補整理／
+#       HP・note下書き／面談メモ作成
+# 原則：AIは判断者ではなく「書庫番・整理係」。結論を急がせず、
+#       事実・未確定・保留・次回確認を分けて整理します。
+# ============================================================
+
+ASSISTANT_MODE_OPTIONS = [
+    "案件確認",
+    "次回確認事項抽出",
+    "制度候補整理",
+    "面談メモ作成",
+    "HP記事下書き",
+    "note記事下書き",
+    "自由相談",
+]
+
+
+def ensure_assistant_tables():
+    """にゃんともアシスタント用ログテーブル。古いDBでもapp.pyだけで追加できるようにする。"""
+    execute("""
+        CREATE TABLE IF NOT EXISTS assistant_logs (
+            assistant_log_id TEXT PRIMARY KEY,
+            created_at TIMESTAMP,
+            updated_at TIMESTAMP,
+            created_by TEXT,
+            case_id TEXT REFERENCES cases(case_id) ON DELETE SET NULL,
+            client_id TEXT REFERENCES clients(client_id) ON DELETE SET NULL,
+            mode TEXT,
+            user_question TEXT,
+            source_text TEXT,
+            answer_text TEXT,
+            model TEXT,
+            memo TEXT
+        )
+    """)
+
+
+def save_assistant_log(case_id, client_id, mode, user_question, source_text, answer_text, model="", memo=""):
+    try:
+        log_id = make_id("assist")
+        execute("""
+            INSERT INTO assistant_logs
+            (assistant_log_id, created_at, updated_at, created_by, case_id, client_id, mode, user_question, source_text, answer_text, model, memo)
+            VALUES (%(assistant_log_id)s, %(created_at)s, %(updated_at)s, %(created_by)s, %(case_id)s, %(client_id)s, %(mode)s, %(user_question)s, %(source_text)s, %(answer_text)s, %(model)s, %(memo)s)
+        """, {
+            "assistant_log_id": log_id,
+            "created_at": now_text(),
+            "updated_at": now_text(),
+            "created_by": st.session_state.get("login_id", ""),
+            "case_id": case_id or None,
+            "client_id": client_id or None,
+            "mode": mode,
+            "user_question": user_question,
+            "source_text": source_text,
+            "answer_text": answer_text,
+            "model": model,
+            "memo": memo,
+        })
+        log_action("create", "assistant_logs", log_id, f"にゃんともアシスタント：{mode}")
+        return log_id
+    except Exception:
+        return ""
+
+
+def _assistant_df_lines(title, df, cols, limit=8):
+    lines = [f"\n■ {title}"]
+    if df is None or df.empty:
+        lines.append("未登録")
+        return "\n".join(lines)
+    for _, r in df.head(limit).iterrows():
+        parts = []
+        for col in cols:
+            if col in r and normalize_text(r[col]):
+                parts.append(f"{col}:{normalize_text(r[col])}")
+        if parts:
+            lines.append("- " + "／".join(parts))
+    return "\n".join(lines)
+
+
+def get_assistant_case_options():
+    mapping, labels = get_case_options()
+    return mapping, ["指定しない（全体から検索）"] + labels
+
+
+def search_assistant_related_cases(query, limit=8):
+    """質問文から近い案件を横断検索する。PostgreSQL ILIKE前提。"""
+    q = normalize_text(query)
+    if not q:
+        return fetch_df("""
+            SELECT c.case_id, c.client_id, cl.name AS client_name, c.case_title, c.case_type, c.status,
+                   c.current_state, c.worries, c.not_decide, c.next_check, c.next_check_date, c.updated_at
+            FROM cases c JOIN clients cl ON c.client_id = cl.client_id
+            ORDER BY c.updated_at DESC NULLS LAST, c.created_at DESC
+            LIMIT %(limit)s
+        """, {"limit": limit})
+    pattern = f"%{q}%"
+    return fetch_df("""
+        SELECT DISTINCT c.case_id, c.client_id, cl.name AS client_name, c.case_title, c.case_type, c.status,
+               c.current_state, c.worries, c.not_decide, c.next_check, c.next_check_date, c.updated_at
+        FROM cases c
+        JOIN clients cl ON c.client_id = cl.client_id
+        LEFT JOIN history h ON h.case_id = c.case_id
+        LEFT JOIN consultation_cards cc ON cc.case_id = c.case_id
+        LEFT JOIN pending_items p ON p.case_id = c.case_id
+        LEFT JOIN policy_candidates pc ON pc.case_id = c.case_id
+        WHERE cl.name ILIKE %(pattern)s
+           OR c.case_title ILIKE %(pattern)s
+           OR c.case_type ILIKE %(pattern)s
+           OR c.status ILIKE %(pattern)s
+           OR c.current_state ILIKE %(pattern)s
+           OR c.house_state ILIKE %(pattern)s
+           OR c.cat_relation ILIKE %(pattern)s
+           OR c.family_gap ILIKE %(pattern)s
+           OR c.worries ILIKE %(pattern)s
+           OR c.not_decide ILIKE %(pattern)s
+           OR c.next_check ILIKE %(pattern)s
+           OR h.record ILIKE %(pattern)s
+           OR h.next_action ILIKE %(pattern)s
+           OR cc.concern ILIKE %(pattern)s
+           OR cc.client_words ILIKE %(pattern)s
+           OR p.theme ILIKE %(pattern)s
+           OR p.reason ILIKE %(pattern)s
+           OR pc.category ILIKE %(pattern)s
+           OR pc.policy_name ILIKE %(pattern)s
+        ORDER BY c.updated_at DESC NULLS LAST
+        LIMIT %(limit)s
+    """, {"pattern": pattern, "limit": limit})
+
+
+def build_nyantomo_assistant_source(user_question, selected_case_id=""):
+    """選択案件または検索結果から、AIに渡す内部コンテキストを作る。"""
+    selected_case_id = normalize_text(selected_case_id)
+    lines = []
+    if selected_case_id:
+        lines.append("# 選択案件の詳細")
+        lines.append(build_case_ai_source(selected_case_id))
+        return "\n".join([x for x in lines if x]).strip()
+
+    related = search_assistant_related_cases(user_question, limit=8)
+    lines.append("# 横断検索で見つかった関連案件")
+    lines.append(_assistant_df_lines(
+        "関連案件一覧",
+        related,
+        ["client_name", "case_title", "case_type", "status", "current_state", "worries", "not_decide", "next_check", "next_check_date", "updated_at"],
+        limit=8,
+    ))
+
+    if related is not None and not related.empty:
+        for _, r in related.head(3).iterrows():
+            cid = normalize_text(r.get("case_id", ""))
+            if cid:
+                lines.append("\n---")
+                lines.append(build_case_ai_source(cid))
+    else:
+        lines.append("\n該当案件は見つかりませんでした。直近案件を確認してください。")
+        recent = search_assistant_related_cases("", limit=5)
+        lines.append(_assistant_df_lines(
+            "直近案件",
+            recent,
+            ["client_name", "case_title", "case_type", "status", "next_check", "next_check_date", "updated_at"],
+            limit=5,
+        ))
+    return "\n".join([x for x in lines if x]).strip()
+
+
+def build_nyantomo_assistant_prompt(mode, user_question, source_text):
+    return f"""
+あなたは『にゃんとも 住まいと猫の相談室』の常駐AI秘書「にゃんともアシスタント」です。
+役割は、答えを急がせることではなく、相談記録・案件・カード・履歴を探し、
+事実／未確定／保留／次回確認を分けて、健一さんが次に確認しやすい形に整えることです。
+
+厳守ルール：
+- 法律判断、医療判断、税務判断、不動産判断はしない
+- 売却すべき、後見すべき、信託すべきなどの結論を出さない
+- 相談者本人の判断を奪わない
+- 記録にないことは「未確認」と書く
+- 急がせる表現を避ける
+- にゃんともは「猫と暮らす人の判断の時間を守る」立場で整理する
+- 出力は内部用。相談者に渡す場合は、別途やわらかく整える必要がある
+
+今回のモード：{mode}
+健一さんの質問：{user_question}
+
+モード別の出力方針：
+- 案件確認：現在状態、保留点、未確認点、次回確認、注意点を短く整理
+- 次回確認事項抽出：次回聞くことを3〜7個に絞り、優先順に整理
+- 制度候補整理：断定せず、確認候補・確認先・未確認条件・注意点に分ける
+- 面談メモ作成：面談前に見るA4メモ風に、テーマ・聞くこと・急がないことを整理
+- HP記事下書き：個人情報を出さず、一般化した1000字程度のHP向け本文にする
+- note記事下書き：にゃんとも文体で、情景から入り、専門知識は生活に溶かす
+- 自由相談：質問意図に沿って、記録ベースで整理する
+
+出力形式：
+## 1. まず見えていること
+## 2. 保留してよいこと
+## 3. 未確認のこと
+## 4. 次回確認
+## 5. にゃんともとしての関わり方
+## 6. 注意点
+
+以下が参照できる内部記録です。
+---
+{source_text}
+""".strip()
+
+
+def build_local_assistant_answer(mode, user_question, source_text):
+    """APIキー未設定時の簡易整理。AI生成ではないが、検索結果の確認用に使える。"""
+    return f"""## 1. まず見えていること
+OpenAI APIキーが未設定のため、AI文章生成は行っていません。下の内部記録をもとに、案件・履歴・カードを確認してください。
+
+## 2. 保留してよいこと
+記録上の「今は決めないこと」「保留事項」「判断保留カード」を確認してください。
+
+## 3. 未確認のこと
+「ヒアリング漏れ」「次回ヒアリング項目」「未確認事項」を確認してください。
+
+## 4. 次回確認
+「次回確認」「次回確認日」「相談履歴の次の対応」を確認してください。
+
+## 5. にゃんともとしての関わり方
+判断を急がせず、記録・整理・保留・次回確認の範囲で扱うのが安全です。
+
+## 6. 注意点
+法律・医療・税務・登記・強い不動産判断は、必要に応じて専門職確認候補として分けてください。
+
+---
+### 参照内部記録
+{source_text[:12000]}
+""".strip()
+
+
+def render_nyantomo_assistant():
+    st.subheader("🐾 にゃんともアシスタント｜常駐AI秘書")
+    st.caption("相談履歴・過去案件・カード・保留事項・制度候補を横断して、判断を急がせずに整理します。")
+
+    try:
+        ensure_assistant_tables()
+    except Exception as e:
+        st.warning(f"アシスタント用テーブルの確認に失敗しました：{e}")
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("OpenAI API", "設定あり" if get_openai_api_key() else "未設定")
+    c2.metric("AIモデル", get_openai_model())
+    try:
+        log_count = fetch_one("SELECT COUNT(*) AS count FROM assistant_logs")
+        c3.metric("アシスタント履歴", int(log_count.get("count", 0)) if log_count else 0)
+    except Exception:
+        c3.metric("アシスタント履歴", "未確認")
+
+    st.markdown("---")
+    st.markdown("### アシスタントに聞く")
+
+    case_map, case_labels = get_assistant_case_options()
+    mode = st.selectbox("モード", ASSISTANT_MODE_OPTIONS)
+    selected_label = st.selectbox("対象案件", case_labels)
+    selected_case_id = "" if selected_label == "指定しない（全体から検索）" else case_map.get(selected_label, "")
+
+    default_question = "Aさんの案件どうだっけ？" if not selected_case_id else "この案件の現在地と次回確認事項を整理して"
+    user_question = st.text_area("質問・指示", value=default_question, height=100)
+
+    col_a, col_b = st.columns([1, 1])
+    run_ai = col_a.button("にゃんともアシスタントで整理する", type="primary")
+    show_source = col_b.checkbox("参照した内部記録も表示する", value=False)
+
+    if run_ai:
+        if not normalize_text(user_question):
+            st.error("質問・指示を入力してください。")
+            return
+        with st.spinner("相談記録を探して、にゃんともアシスタントが整理しています..."):
+            source_text = build_nyantomo_assistant_source(user_question, selected_case_id)
+            client_id = case_to_client(selected_case_id) if selected_case_id else ""
+            if get_openai_api_key():
+                prompt = build_nyantomo_assistant_prompt(mode, user_question, source_text)
+                try:
+                    answer_text, model = call_openai_summary(prompt)
+                except Exception as e:
+                    st.error("AI整理に失敗しました。APIキー・モデル名・requirements.txt の openai を確認してください。")
+                    st.exception(e)
+                    return
+            else:
+                answer_text = build_local_assistant_answer(mode, user_question, source_text)
+                model = "local-fallback"
+
+            save_assistant_log(selected_case_id, client_id, mode, user_question, source_text, answer_text, model)
+            st.session_state["nyantomo_assistant_last_answer"] = answer_text
+            st.session_state["nyantomo_assistant_last_source"] = source_text
+            st.session_state["nyantomo_assistant_last_mode"] = mode
+            clear_app_cache()
+
+    if st.session_state.get("nyantomo_assistant_last_answer"):
+        st.markdown("### 整理結果")
+        st.markdown(st.session_state["nyantomo_assistant_last_answer"])
+        st.download_button(
+            "整理結果をMarkdownでダウンロード",
+            st.session_state["nyantomo_assistant_last_answer"].encode("utf-8-sig"),
+            file_name=f"nyantomo_assistant_{today_text()}.md",
+            mime="text/markdown",
+        )
+        if show_source:
+            st.markdown("### 参照した内部記録")
+            st.text_area("内部記録", st.session_state.get("nyantomo_assistant_last_source", ""), height=360)
+
+    st.markdown("---")
+    st.markdown("### アシスタント履歴")
+    try:
+        logs = fetch_df("""
+            SELECT al.created_at, al.mode, cl.name AS client_name, c.case_title, al.user_question, al.answer_text, al.model
+            FROM assistant_logs al
+            LEFT JOIN cases c ON al.case_id = c.case_id
+            LEFT JOIN clients cl ON al.client_id = cl.client_id
+            ORDER BY al.created_at DESC
+            LIMIT 30
+        """)
+        if logs.empty:
+            st.info("まだアシスタント履歴はありません。")
+        else:
+            st.dataframe(
+                logs[["created_at", "mode", "client_name", "case_title", "user_question", "model"]],
+                use_container_width=True,
+                hide_index=True,
+            )
+            with st.expander("直近の回答本文を確認"):
+                selected_idx = st.selectbox("表示する履歴", list(range(len(logs))), format_func=lambda i: f"{logs.iloc[i]['created_at']}｜{logs.iloc[i]['mode']}｜{logs.iloc[i]['user_question']}")
+                st.markdown(normalize_text(logs.iloc[selected_idx]["answer_text"]))
+    except Exception as e:
+        st.warning(f"アシスタント履歴の読み込みに失敗しました：{e}")
+
 def render_analysis():
     st.subheader("分析・管理")
     st.markdown("### 状態遷移ログ")
@@ -4552,6 +4884,7 @@ if not has_database_url():
 try:
     init_db(hash_password, make_id, now_text)
     ensure_extension_tables()
+    ensure_assistant_tables()
 except Exception as e:
     st.title(APP_TITLE)
     st.error("PostgreSQLへの接続または初期化に失敗しました。")
@@ -4589,6 +4922,11 @@ for m in NYANTOMO_V2_MENUS:
     if m not in available_menus:
         available_menus.append(m)
 
+ASSISTANT_MENUS = ["にゃんともアシスタント"]
+for m in ASSISTANT_MENUS:
+    if m not in available_menus:
+        available_menus.append(m)
+
 GUARDIAN_MENUS = [
     "DB接続確認",
     "後見ダッシュボード",
@@ -4616,7 +4954,9 @@ for m in GUARDIAN_MENUS:
 menu = st.sidebar.radio("メニュー", available_menus)
 logout_button()
 
-if menu == "DB接続確認":
+if menu == "にゃんともアシスタント":
+    render_nyantomo_assistant()
+elif menu == "DB接続確認":
     render_db_connection_check()
 elif menu == "管理ダッシュボード":
     render_dashboard()
