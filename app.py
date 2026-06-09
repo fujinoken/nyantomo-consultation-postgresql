@@ -46,6 +46,8 @@ BACKUP_DIR.mkdir(exist_ok=True)
 DEFAULT_AUTO_BACKUP_HOURS = 24
 DEFAULT_BACKUP_KEEP = 14
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
+DEFAULT_CACHE_TTL_SECONDS = 30
+DEFAULT_AUTO_BACKUP_CHECK_MINUTES = 60
 
 
 # ============================================================
@@ -458,6 +460,18 @@ def date_or_none(value):
         return None
 
 
+def clear_app_cache():
+    """
+    登録・更新・削除後に一覧やダッシュボードのキャッシュをクリアします。
+    30秒キャッシュで画面切替を軽くしつつ、更新直後は最新表示に戻します。
+    """
+    try:
+        st.cache_data.clear()
+    except Exception:
+        pass
+
+
+
 
 def ymd_selectbox_date(label, default=None, start_year=1900, end_year=None, key_prefix="ymd"):
     """
@@ -545,6 +559,7 @@ def log_action(action, table_name="", record_id="", memo=""):
         pass
 
 
+@st.cache_data(ttl=DEFAULT_CACHE_TTL_SECONDS, show_spinner=False)
 def get_clients():
     return fetch_df("""
         SELECT client_id, created_at, updated_at, name, age_group, area, contact_method, position, note
@@ -553,6 +568,7 @@ def get_clients():
     """)
 
 
+@st.cache_data(ttl=DEFAULT_CACHE_TTL_SECONDS, show_spinner=False)
 def get_cases():
     return fetch_df("""
         SELECT c.case_id, c.client_id, cl.name AS client_name, c.created_at, c.updated_at,
@@ -567,6 +583,7 @@ def get_cases():
     """)
 
 
+@st.cache_data(ttl=DEFAULT_CACHE_TTL_SECONDS, show_spinner=False)
 def get_case_options():
     df = get_cases()
     if df.empty:
@@ -580,6 +597,7 @@ def get_case_options():
     return mapping, labels
 
 
+@st.cache_data(ttl=DEFAULT_CACHE_TTL_SECONDS, show_spinner=False)
 def get_client_options():
     df = get_clients()
     if df.empty:
@@ -591,6 +609,71 @@ def get_client_options():
         labels.append(label)
         mapping[label] = r["client_id"]
     return mapping, labels
+
+
+@st.cache_data(ttl=DEFAULT_CACHE_TTL_SECONDS, show_spinner=False)
+def get_dashboard_counts():
+    return fetch_one("""
+        SELECT
+            (SELECT COUNT(*) FROM clients) AS clients_count,
+            (SELECT COUNT(*) FROM cases) AS cases_count,
+            (SELECT COUNT(*) FROM cases WHERE COALESCE(status,'') <> '終了') AS open_cases_count,
+            (SELECT COUNT(*) FROM cases
+                WHERE COALESCE(status,'') <> '終了'
+                AND next_check_date IS NOT NULL
+                AND next_check_date <= CURRENT_DATE + INTERVAL '7 days') AS need_check_count
+    """)
+
+
+@st.cache_data(ttl=DEFAULT_CACHE_TTL_SECONDS, show_spinner=False)
+def get_dashboard_need_check():
+    return fetch_df("""
+        SELECT cl.name AS client_name, c.case_title, c.status, c.next_check_date, c.next_check
+        FROM cases c JOIN clients cl ON c.client_id = cl.client_id
+        WHERE COALESCE(c.status,'') <> '終了'
+          AND c.next_check_date IS NOT NULL
+          AND c.next_check_date <= CURRENT_DATE + INTERVAL '7 days'
+        ORDER BY c.next_check_date ASC, c.updated_at DESC
+    """)
+
+
+@st.cache_data(ttl=DEFAULT_CACHE_TTL_SECONDS, show_spinner=False)
+def get_dashboard_hearing():
+    return fetch_df("""
+        SELECT cl.name AS client_name, c.case_title, c.status, c.hearing_missing, c.next_hearing_items
+        FROM cases c JOIN clients cl ON c.client_id = cl.client_id
+        WHERE COALESCE(c.status,'') <> '終了'
+          AND NULLIF(TRIM(COALESCE(c.hearing_missing,'')), '') IS NOT NULL
+        ORDER BY c.updated_at DESC
+    """)
+
+
+@st.cache_data(ttl=DEFAULT_CACHE_TTL_SECONDS, show_spinner=False)
+def get_dashboard_do_not():
+    return fetch_df("""
+        SELECT cl.name AS client_name, c.case_title, c.status, c.do_not_do_now, c.not_decide
+        FROM cases c JOIN clients cl ON c.client_id = cl.client_id
+        WHERE COALESCE(c.status,'') <> '終了'
+          AND NULLIF(TRIM(COALESCE(c.do_not_do_now,'')), '') IS NOT NULL
+        ORDER BY c.updated_at DESC
+    """)
+
+
+@st.cache_data(ttl=DEFAULT_CACHE_TTL_SECONDS, show_spinner=False)
+def get_dashboard_recent_cases():
+    return fetch_df("""
+        SELECT cl.name AS client_name, c.case_title, c.case_type, c.status, c.consult_date, c.updated_at
+        FROM cases c JOIN clients cl ON c.client_id = cl.client_id
+        ORDER BY c.updated_at DESC NULLS LAST, c.created_at DESC LIMIT 20
+    """)
+
+
+@st.cache_data(ttl=DEFAULT_CACHE_TTL_SECONDS, show_spinner=False)
+def get_dashboard_status_counts():
+    return fetch_df("""
+        SELECT COALESCE(status, '未設定') AS status, COUNT(*) AS 件数
+        FROM cases GROUP BY COALESCE(status, '未設定') ORDER BY 件数 DESC
+    """)
 
 
 def case_to_client(case_id):
@@ -619,6 +702,7 @@ def login_screen():
             st.session_state["display_name"] = user["display_name"]
             log_action("login", "app_users", user["user_id"], "ログイン")
             st.success("ログインしました。")
+            clear_app_cache()
             st.rerun()
         else:
             st.error("ログインIDまたはパスワードが違います。")
@@ -641,6 +725,7 @@ def logout_button():
         if st.button("ログアウト"):
             log_action("logout", "app_users", st.session_state.get("user_id", ""), "ログアウト")
             st.session_state.clear()
+            clear_app_cache()
             st.rerun()
 
 
@@ -649,16 +734,7 @@ def render_dashboard():
 
     st.subheader("ダッシュボード")
 
-    counts = fetch_one("""
-        SELECT
-            (SELECT COUNT(*) FROM clients) AS clients_count,
-            (SELECT COUNT(*) FROM cases) AS cases_count,
-            (SELECT COUNT(*) FROM cases WHERE COALESCE(status,'') <> '終了') AS open_cases_count,
-            (SELECT COUNT(*) FROM cases
-                WHERE COALESCE(status,'') <> '終了'
-                AND next_check_date IS NOT NULL
-                AND next_check_date <= CURRENT_DATE + INTERVAL '7 days') AS need_check_count
-    """)
+    counts = get_dashboard_counts()
 
     clients_count = int(counts.get("clients_count", 0))
     cases_count = int(counts.get("cases_count", 0))
@@ -709,30 +785,9 @@ def render_dashboard():
 
     st.markdown("---")
 
-    need_check = fetch_df("""
-        SELECT cl.name AS client_name, c.case_title, c.status, c.next_check_date, c.next_check
-        FROM cases c JOIN clients cl ON c.client_id = cl.client_id
-        WHERE COALESCE(c.status,'') <> '終了'
-          AND c.next_check_date IS NOT NULL
-          AND c.next_check_date <= CURRENT_DATE + INTERVAL '7 days'
-        ORDER BY c.next_check_date ASC, c.updated_at DESC
-    """)
-
-    hearing = fetch_df("""
-        SELECT cl.name AS client_name, c.case_title, c.status, c.hearing_missing, c.next_hearing_items
-        FROM cases c JOIN clients cl ON c.client_id = cl.client_id
-        WHERE COALESCE(c.status,'') <> '終了'
-          AND NULLIF(TRIM(COALESCE(c.hearing_missing,'')), '') IS NOT NULL
-        ORDER BY c.updated_at DESC
-    """)
-
-    do_not = fetch_df("""
-        SELECT cl.name AS client_name, c.case_title, c.status, c.do_not_do_now, c.not_decide
-        FROM cases c JOIN clients cl ON c.client_id = cl.client_id
-        WHERE COALESCE(c.status,'') <> '終了'
-          AND NULLIF(TRIM(COALESCE(c.do_not_do_now,'')), '') IS NOT NULL
-        ORDER BY c.updated_at DESC
-    """)
+    need_check = get_dashboard_need_check()
+    hearing = get_dashboard_hearing()
+    do_not = get_dashboard_do_not()
 
     left_mid, right_mid = st.columns(2)
 
@@ -760,11 +815,7 @@ def render_dashboard():
 
     with bottom_left:
         st.markdown('<div class="ny-section-title">最近の案件</div>', unsafe_allow_html=True)
-        recent = fetch_df("""
-            SELECT cl.name AS client_name, c.case_title, c.case_type, c.status, c.consult_date, c.updated_at
-            FROM cases c JOIN clients cl ON c.client_id = cl.client_id
-            ORDER BY c.updated_at DESC NULLS LAST, c.created_at DESC LIMIT 20
-        """)
+        recent = get_dashboard_recent_cases()
         safe_df_display(
             recent,
             "案件がありません。",
@@ -774,10 +825,7 @@ def render_dashboard():
 
     with bottom_right:
         st.markdown('<div class="ny-section-title">状態別件数</div>', unsafe_allow_html=True)
-        status_df = fetch_df("""
-            SELECT COALESCE(status, '未設定') AS status, COUNT(*) AS 件数
-            FROM cases GROUP BY COALESCE(status, '未設定') ORDER BY 件数 DESC
-        """)
+        status_df = get_dashboard_status_counts()
         safe_df_display(status_df, "案件がありません。", ["status", "件数"], height=210)
 
         st.markdown('<div class="ny-section-title">要確認案件</div>', unsafe_allow_html=True)
@@ -819,6 +867,7 @@ def render_clients():
             })
             log_action("create", "clients", client_id, "相談者登録")
             st.success("相談者を登録しました。")
+            clear_app_cache()
             st.rerun()
 
     st.markdown("---")
@@ -859,6 +908,7 @@ def render_clients():
             })
             log_action("update", "clients", selected, "相談者更新")
             st.success("相談者を更新しました。")
+            clear_app_cache()
             st.rerun()
         if delete:
             if not delete_confirm or delete_text != "DELETE":
@@ -867,6 +917,7 @@ def render_clients():
                 execute("DELETE FROM clients WHERE client_id=%(client_id)s", {"client_id": selected})
                 log_action("delete", "clients", selected, "相談者削除")
                 st.success("相談者を削除しました。")
+                clear_app_cache()
                 st.rerun()
 
 
@@ -927,6 +978,7 @@ def render_cases():
                 })
                 log_action("create", "cases", case_id, "案件登録")
                 st.success("案件を登録しました。")
+                clear_app_cache()
                 st.rerun()
 
     st.markdown("---")
@@ -1004,6 +1056,7 @@ def render_cases():
                 })
             log_action("update", "cases", selected, "案件更新")
             st.success("案件を更新しました。")
+            clear_app_cache()
             st.rerun()
         if delete:
             if not delete_confirm or delete_text != "DELETE":
@@ -1012,6 +1065,7 @@ def render_cases():
                 execute("DELETE FROM cases WHERE case_id=%(case_id)s", {"case_id": selected})
                 log_action("delete", "cases", selected, "案件削除")
                 st.success("案件を削除しました。")
+                clear_app_cache()
                 st.rerun()
 
 
@@ -1048,6 +1102,7 @@ def related_card_page(table_name, id_col, title, fields):
         execute(f"INSERT INTO {table_name} ({', '.join(cols)}) VALUES ({', '.join([f'%({c})s' for c in cols])})", params)
         log_action("create", table_name, new_id, f"{title}登録")
         st.success("登録しました。")
+        clear_app_cache()
         st.rerun()
 
     st.markdown("---")
@@ -1075,6 +1130,7 @@ def related_card_page(table_name, id_col, title, fields):
             execute(f"UPDATE {table_name} SET updated_at=%(updated_at)s, {set_clause} WHERE {id_col}=%(id)s", params)
             log_action("update", table_name, selected, f"{title}更新")
             st.success("更新しました。")
+            clear_app_cache()
             st.rerun()
         if delete:
             if not delete_confirm or delete_text != "DELETE":
@@ -1083,6 +1139,7 @@ def related_card_page(table_name, id_col, title, fields):
                 execute(f"DELETE FROM {table_name} WHERE {id_col}=%(id)s", {"id": selected})
                 log_action("delete", table_name, selected, f"{title}削除")
                 st.success("削除しました。")
+                clear_app_cache()
                 st.rerun()
 
 
@@ -1118,6 +1175,7 @@ def render_history():
             execute("UPDATE cases SET updated_at=%(updated_at)s WHERE case_id=%(case_id)s", {"updated_at": now_text(), "case_id": case_id})
             log_action("create", "history", history_id, "相談履歴登録")
             st.success("相談履歴を登録しました。")
+            clear_app_cache()
             st.rerun()
     df = fetch_df("""
         SELECT history_id, record_date, record_type, before_status, after_status, record, next_action, internal_memo, created_at
@@ -1155,6 +1213,7 @@ def render_line_templates():
         })
         log_action("create", "line_templates", template_id, "LINEテンプレート登録")
         st.success("登録しました。")
+        clear_app_cache()
         st.rerun()
 
     df = fetch_df("SELECT * FROM line_templates ORDER BY updated_at DESC NULLS LAST, created_at DESC")
@@ -1165,6 +1224,7 @@ def render_line_templates():
             execute("DELETE FROM line_templates WHERE template_id=%(id)s", {"id": selected})
             log_action("delete", "line_templates", selected, "LINEテンプレート削除")
             st.success("削除しました。")
+            clear_app_cache()
             st.rerun()
 
 
@@ -1520,7 +1580,28 @@ def cleanup_old_backups(keep=None):
 
 
 def maybe_run_auto_backup():
-    """最終自動バックアップから指定時間以上経っていれば自動作成する。"""
+    """最終自動バックアップから指定時間以上経っていれば自動作成する。
+
+    軽量化：
+    画面操作のたびにDBへ確認しないよう、セッション内では
+    AUTO_BACKUP_CHECK_MINUTES ごとにだけ確認します。
+    """
+    try:
+        check_minutes = int(get_secret_value("AUTO_BACKUP_CHECK_MINUTES", DEFAULT_AUTO_BACKUP_CHECK_MINUTES))
+    except Exception:
+        check_minutes = DEFAULT_AUTO_BACKUP_CHECK_MINUTES
+    if check_minutes > 0:
+        last_check = st.session_state.get("_last_auto_backup_check")
+        now_dt = datetime.now()
+        if last_check:
+            try:
+                elapsed_minutes = (now_dt - last_check).total_seconds() / 60
+                if elapsed_minutes < check_minutes:
+                    return None
+            except Exception:
+                pass
+        st.session_state["_last_auto_backup_check"] = now_dt
+
     try:
         hours = int(get_secret_value("AUTO_BACKUP_HOURS", DEFAULT_AUTO_BACKUP_HOURS))
     except Exception:
@@ -2403,6 +2484,7 @@ def render_consultation_cards():
             execute("UPDATE cases SET updated_at=%(updated_at)s WHERE case_id=%(case_id)s", {"updated_at": now_text(), "case_id": case_id})
             log_action("create", "consultation_cards", card_id, "Ver2.1カード登録")
             st.success("カードを登録しました。")
+            clear_app_cache()
             st.rerun()
 
     st.markdown("---")
@@ -2499,6 +2581,7 @@ def render_consultation_cards():
             })
             log_action("update", "consultation_cards", selected, "Ver2.1カード更新")
             st.success("カードを更新しました。")
+            clear_app_cache()
             st.rerun()
 
         if delete:
@@ -2508,6 +2591,7 @@ def render_consultation_cards():
                 execute("DELETE FROM consultation_cards WHERE card_id=%(card_id)s", {"card_id": selected})
                 log_action("delete", "consultation_cards", selected, "Ver2.1カード削除")
                 st.success("カードを削除しました。")
+                clear_app_cache()
                 st.rerun()
 
 
@@ -2566,6 +2650,7 @@ def render_pending_items():
             execute("UPDATE cases SET updated_at=%(updated_at)s WHERE case_id=%(case_id)s", {"updated_at": now_text(), "case_id": case_id})
             log_action("create", "pending_items", pending_id, "Ver2.0保留事項登録")
             st.success("保留事項を登録しました。")
+            clear_app_cache()
             st.rerun()
 
     st.markdown("---")
@@ -2634,6 +2719,7 @@ def render_pending_items():
             })
             log_action("update", "pending_items", selected, "Ver2.0保留事項更新")
             st.success("保留事項を更新しました。")
+            clear_app_cache()
             st.rerun()
 
         if delete:
@@ -2643,6 +2729,7 @@ def render_pending_items():
                 execute("DELETE FROM pending_items WHERE pending_id=%(pending_id)s", {"pending_id": selected})
                 log_action("delete", "pending_items", selected, "Ver2.0保留事項削除")
                 st.success("保留事項を削除しました。")
+                clear_app_cache()
                 st.rerun()
 
 
@@ -3134,6 +3221,7 @@ def render_policy_candidates():
                 "memo": memo,
             })
             st.success("生活生活制度候補を登録しました。")
+            clear_app_cache()
             st.rerun()
 
         st.markdown("### キーワードから候補を仮抽出")
@@ -3167,6 +3255,7 @@ def render_policy_candidates():
                         }
                         save_policy_candidate(case_id, client_id, values)
                         st.success("候補を登録しました。")
+                        clear_app_cache()
                         st.rerun()
 
     with tab2:
@@ -3185,6 +3274,7 @@ def render_policy_candidates():
                         summary_text, model = call_openai_summary(prompt)
                         save_ai_summary(case_id, client_id, "カード整理AI｜生活制度候補整理", source_text, summary_text, extra_instruction, model)
                     st.success("生活制度候補整理AIを保存しました。AI要約メモにも表示されます。")
+                    clear_app_cache()
                     st.rerun()
                 except Exception as e:
                     st.error("生活制度候補整理AIの作成に失敗しました。")
@@ -3269,6 +3359,7 @@ def render_policy_candidates():
                 })
                 log_action("update", "policy_candidates", selected, "制度候補更新")
                 st.success("生活生活制度候補を更新しました。")
+                clear_app_cache()
                 st.rerun()
             if delete:
                 if not delete_confirm or delete_text != "DELETE":
@@ -3277,6 +3368,7 @@ def render_policy_candidates():
                     execute("DELETE FROM policy_candidates WHERE policy_id=%(policy_id)s", {"policy_id": selected})
                     log_action("delete", "policy_candidates", selected, "制度候補削除")
                     st.success("生活生活制度候補を削除しました。")
+                    clear_app_cache()
                     st.rerun()
 
 def render_ai_summary():
@@ -3366,6 +3458,7 @@ def render_ai_summary():
                     summary_text, model = call_openai_summary(prompt)
                     save_ai_summary(case_id, client_id, summary_type, source_text, summary_text, extra_instruction, model)
                 st.success("カード整理AIを保存しました。")
+                clear_app_cache()
                 st.rerun()
             except Exception as e:
                 st.error("カード整理AIの作成に失敗しました。")
@@ -3417,6 +3510,7 @@ def render_ai_summary():
                 execute("DELETE FROM ai_summaries WHERE summary_id=%(id)s", {"id": selected})
                 log_action("delete", "ai_summaries", selected, "カード整理AI削除")
                 st.success("削除しました。")
+                clear_app_cache()
                 st.rerun()
 
 def render_backup():
@@ -3450,6 +3544,7 @@ def render_backup():
                 path = save_backup_file("manual", "画面から手動作成")
                 cleanup_old_backups(keep)
                 st.success(f"バックアップを保存しました：{path.name}")
+                clear_app_cache()
                 st.rerun()
             except Exception as e:
                 st.error("バックアップ作成に失敗しました。")
@@ -3753,6 +3848,7 @@ def render_guardian_wards():
             })
             log_action("create", "guardian_wards", ward_id, "被後見人登録")
             st.success("被後見人を登録しました。")
+            clear_app_cache()
             st.rerun()
 
     st.markdown("---")
@@ -3781,6 +3877,7 @@ def render_guardian_wards():
             """, {"updated_at": now_text(), "birth_date": new_birth_date, "start_date": new_start_date, "status": new_status, "emergency_level": new_emergency, "next_check_date": new_next, "memo": new_memo, "ward_id": selected})
             log_action("update", "guardian_wards", selected, "被後見人更新")
             st.success("更新しました。")
+            clear_app_cache()
             st.rerun()
 
 
@@ -3826,6 +3923,7 @@ def render_guardian_card(card_type):
         """, params)
         log_action("create", "guardian_cards", card_id, f"{card_type}登録")
         st.success("登録しました。")
+        clear_app_cache()
         st.rerun()
 
     st.markdown("---")
@@ -3881,6 +3979,7 @@ def render_guardian_resource_map():
         })
         log_action("create", "guardian_resource_map", map_id, "リソース地図登録")
         st.success("保存しました。")
+        clear_app_cache()
         st.rerun()
 
     st.markdown("---")
@@ -3938,6 +4037,7 @@ def render_guardian_interviews():
         """, {"log_id": log_id, "ward_id": ward_id, "created_at": now_text(), "updated_at": now_text(), "updated_by": st.session_state.get("login_id", ""), "confidentiality_level": "高", "interview_date": interview_date, "place": place, "content": content, "ward_words": ward_words, "family_words": family_words, "action_taken": action_taken, "next_check": next_check, "memo": memo})
         log_action("create", "guardian_interview_logs", log_id, "後見面談記録")
         st.success("登録しました。")
+        clear_app_cache()
         st.rerun()
     df = fetch_df("SELECT * FROM guardian_interview_logs WHERE ward_id=%(ward_id)s ORDER BY interview_date DESC NULLS LAST, created_at DESC", {"ward_id": ward_id})
     st.dataframe(df, use_container_width=True, hide_index=True)
@@ -4138,6 +4238,7 @@ def render_guardian_card_ai():
                 })
                 log_action("create", "guardian_ai_support", ai_id, f"後見カード整理AI:{summary_type}")
                 st.success("後見カード整理AIを保存しました。")
+                clear_app_cache()
                 st.rerun()
             except Exception as e:
                 st.error("後見カード整理AIの作成に失敗しました。")
@@ -4187,6 +4288,7 @@ def render_guardian_card_ai():
                     execute("DELETE FROM guardian_ai_support WHERE ai_id=%(ai_id)s", {"ai_id": selected})
                     log_action("delete", "guardian_ai_support", selected, "後見カード整理AI削除")
                     st.success("削除しました。")
+                    clear_app_cache()
                     st.rerun()
 
 
@@ -4216,6 +4318,7 @@ def render_guardian_ai_support():
             """, {"ai_id": ai_id, "ward_id": ward_id, "created_at": now_text(), "updated_by": st.session_state.get("login_id", ""), "support_type": support_type, "source_text": source_text, "result_text": result_text, "model": model, "memo": ""})
             log_action("create", "guardian_ai_support", ai_id, f"後見AI支援:{support_type}")
             st.success("保存しました。")
+            clear_app_cache()
             st.rerun()
         except Exception as e:
             st.error("AI整理に失敗しました。")
@@ -4295,6 +4398,7 @@ def render_db_connection_check():
         st.warning(f"バックアップログ確認に失敗しました：{e}")
 
     if st.button("接続確認を再実行"):
+        clear_app_cache()
         st.rerun()
 
 def render_data_check():
@@ -4349,6 +4453,7 @@ def render_users():
             })
             log_action("create", "app_users", user_id, "ユーザー追加")
             st.success("追加しました。")
+            clear_app_cache()
             st.rerun()
 
 
