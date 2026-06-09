@@ -7,6 +7,7 @@ import json
 import html
 import calendar
 from datetime import date, datetime
+from zoneinfo import ZoneInfo
 from io import BytesIO
 import zipfile
 from pathlib import Path
@@ -48,6 +49,8 @@ DEFAULT_BACKUP_KEEP = 14
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_CACHE_TTL_SECONDS = 30
 DEFAULT_AUTO_BACKUP_CHECK_MINUTES = 60
+APP_TIMEZONE = ZoneInfo("Asia/Tokyo")
+
 
 
 # ============================================================
@@ -419,12 +422,24 @@ def make_id(prefix):
     return f"{prefix}_{uuid.uuid4().hex[:10]}"
 
 
+def now_jst():
+    """アプリ内の現在時刻を日本時間（Asia/Tokyo）で返します。"""
+    return datetime.now(APP_TIMEZONE)
+
+
+def today_jst():
+    """アプリ内の今日の日付を日本時間（Asia/Tokyo）で返します。"""
+    return now_jst().date()
+
+
 def now_text():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    """DB保存用の現在時刻文字列。Streamlit Cloudでも日本時間で保存します。"""
+    return now_jst().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def today_text():
-    return date.today().strftime("%Y-%m-%d")
+    """DB保存用の今日の日付文字列。Streamlit Cloudでも日本時間で保存します。"""
+    return today_jst().strftime("%Y-%m-%d")
 
 
 def hash_password(password):
@@ -479,7 +494,7 @@ def ymd_selectbox_date(label, default=None, start_year=1900, end_year=None, key_
     Streamlit の date_input は年移動がしにくいため、後見対象者の生年月日はこの方式を使います。
     戻り値は datetime.date または None。
     """
-    end_year = end_year or date.today().year
+    end_year = end_year or today_jst().year
     default_date = date_or_none(default)
 
     year_options = ["未選択"] + list(range(end_year, start_year - 1, -1))
@@ -621,7 +636,7 @@ def get_dashboard_counts():
             (SELECT COUNT(*) FROM cases
                 WHERE COALESCE(status,'') <> '終了'
                 AND next_check_date IS NOT NULL
-                AND next_check_date <= CURRENT_DATE + INTERVAL '7 days') AS need_check_count
+                AND next_check_date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Tokyo')::date + INTERVAL '7 days')) AS need_check_count
     """)
 
 
@@ -632,7 +647,7 @@ def get_dashboard_need_check():
         FROM cases c JOIN clients cl ON c.client_id = cl.client_id
         WHERE COALESCE(c.status,'') <> '終了'
           AND c.next_check_date IS NOT NULL
-          AND c.next_check_date <= CURRENT_DATE + INTERVAL '7 days'
+          AND c.next_check_date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Tokyo')::date + INTERVAL '7 days')
         ORDER BY c.next_check_date ASC, c.updated_at DESC
     """)
 
@@ -931,7 +946,7 @@ def render_cases():
     else:
         with st.form("case_create"):
             client_label = st.selectbox("相談者", client_labels)
-            consult_date = st.date_input("相談日", date.today())
+            consult_date = st.date_input("相談日", today_jst())
             case_title = st.text_input("案件名")
             case_type = st.selectbox("案件種別", CASE_TYPE_OPTIONS)
             status = st.selectbox("状態", STATUS_OPTIONS)
@@ -1153,7 +1168,7 @@ def render_history():
     case_id = case_map[selected_label]
     client_id = case_to_client(case_id)
     with st.form("history_create"):
-        record_date = st.date_input("記録日", date.today())
+        record_date = st.date_input("記録日", today_jst())
         record_type = st.selectbox("記録種別", ["相談", "電話", "LINE", "訪問", "状態変更", "内部メモ", "その他"])
         record = st.text_area("記録内容")
         next_action = st.text_area("次の対応")
@@ -1540,7 +1555,7 @@ def build_csv_zip_bytes():
 def save_backup_file(backup_type="manual", note=""):
     """CSV ZIPバックアップをbackupsフォルダへ保存し、ログを残す。"""
     zip_bytes, table_count = build_csv_zip_bytes()
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    stamp = now_jst().strftime("%Y%m%d_%H%M%S")
     file_name = f"nyantomo_backup_{backup_type}_{stamp}.zip"
     path = BACKUP_DIR / file_name
     path.write_bytes(zip_bytes)
@@ -1592,7 +1607,7 @@ def maybe_run_auto_backup():
         check_minutes = DEFAULT_AUTO_BACKUP_CHECK_MINUTES
     if check_minutes > 0:
         last_check = st.session_state.get("_last_auto_backup_check")
-        now_dt = datetime.now()
+        now_dt = now_jst().replace(tzinfo=None)
         if last_check:
             try:
                 elapsed_minutes = (now_dt - last_check).total_seconds() / 60
@@ -1622,7 +1637,7 @@ def maybe_run_auto_backup():
     else:
         try:
             last = pd.to_datetime(row["created_at"]).to_pydatetime()
-            elapsed_hours = (datetime.now() - last).total_seconds() / 3600
+            elapsed_hours = (now_jst().replace(tzinfo=None) - last).total_seconds() / 3600
             should_run = elapsed_hours >= hours
         except Exception:
             should_run = True
@@ -3832,7 +3847,7 @@ def render_guardian_dashboard():
             (SELECT COUNT(*) FROM guardian_wards) AS wards_count,
             (SELECT COUNT(*) FROM guardian_wards WHERE COALESCE(status,'') <> '終了') AS active_count,
             (SELECT COUNT(*) FROM guardian_cards) AS cards_count,
-            (SELECT COUNT(*) FROM guardian_wards WHERE next_check_date IS NOT NULL AND next_check_date <= CURRENT_DATE + INTERVAL '7 days') AS need_check_count
+            (SELECT COUNT(*) FROM guardian_wards WHERE next_check_date IS NOT NULL AND next_check_date <= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Tokyo')::date + INTERVAL '7 days')) AS need_check_count
     """)
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("被後見人", int(counts.get("wards_count", 0)))
@@ -4071,7 +4086,7 @@ def render_guardian_interviews():
     selected_label = st.selectbox("対象被後見人", ward_labels, key="guardian_interview_ward")
     ward_id = ward_map[selected_label]
     with st.form("guardian_interview_create"):
-        interview_date = st.date_input("日時", date.today())
+        interview_date = st.date_input("日時", today_jst())
         place = st.text_input("訪問先")
         content = st.text_area("内容")
         ward_words = st.text_area("本人発言")
