@@ -4725,7 +4725,7 @@ def search_assistant_cases_by_terms(query, limit=30):
     sql = f"""
         SELECT DISTINCT c.case_id, c.client_id, cl.name AS client_name, c.case_title, c.case_type, c.status,
                c.current_state, c.cat_relation, c.house_state, c.family_gap, c.worries,
-               c.not_decide, c.next_check, c.next_check_date, c.updated_at
+               c.not_decide, c.next_check, c.next_check_date, c.updated_at, c.created_at
         FROM cases c
         JOIN clients cl ON c.client_id = cl.client_id
         LEFT JOIN history h ON h.case_id = c.case_id
