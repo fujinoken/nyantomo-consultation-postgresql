@@ -58,16 +58,21 @@ APP_TIMEZONE = ZoneInfo("Asia/Tokyo")
 # にゃんとも相談管理 Ver2.0：カード整理OS 設定
 # ============================================================
 
+# Ver2.1：カード整理で使うカード種別は、現時点では3種類に限定します。
+# 相談判断用の上位カードではなく、登録済みの基本情報カードへ確実に紐付けるための分類です。
 NYANTOMO_CARD_TYPES = [
-    "猫カード",
-    "住まいカード",
-    "家族カード",
-    "健康カード",
-    "お金カード",
-    "制度カード",
-    "支援者カード",
-    "その他カード",
+    "猫情報カード",
+    "空き家カード",
+    "家族情報",
 ]
+
+# 旧Verで保存されたカード種別も、表示・紐付け時に新名称へ寄せます。
+NYANTOMO_CARD_TYPE_ALIASES = {
+    "猫カード": "猫情報カード",
+    "住まいカード": "空き家カード",
+    "家族カード": "家族情報",
+    "家族関係メモ": "家族情報",
+}
 
 NYANTOMO_CARD_STATUS_OPTIONS = ["気になる", "検討中", "保留", "整理済"]
 
@@ -303,6 +308,25 @@ POLICY_CANDIDATE_TEMPLATES = {
 # 猫情報カード・空き家カード・家族関係メモは「基本情報」、
 # Ver2.xカードは「悩み・判断・保留」を整理する上位カードとして扱います。
 RELATED_BASE_CARD_MAP = {
+    "猫情報カード": {
+        "table": "cats",
+        "id_col": "cat_id",
+        "label_sql": "COALESCE(NULLIF(cat_name,''), '猫情報') || COALESCE('｜' || NULLIF(age,''), '') || COALESCE('｜' || NULLIF(sex,''), '')",
+        "label": "猫情報カード",
+    },
+    "空き家カード": {
+        "table": "properties",
+        "id_col": "property_id",
+        "label_sql": "COALESCE(NULLIF(property_name,''), '物件') || COALESCE('｜' || NULLIF(address,''), '')",
+        "label": "空き家カード",
+    },
+    "家族情報": {
+        "table": "family",
+        "id_col": "family_id",
+        "label_sql": "COALESCE(NULLIF(name,''), '家族') || COALESCE('｜' || NULLIF(relation,''), '') || COALESCE('｜' || NULLIF(temperature,''), '')",
+        "label": "家族情報",
+    },
+    # 旧名称互換
     "猫カード": {
         "table": "cats",
         "id_col": "cat_id",
@@ -319,7 +343,7 @@ RELATED_BASE_CARD_MAP = {
         "table": "family",
         "id_col": "family_id",
         "label_sql": "COALESCE(NULLIF(name,''), '家族') || COALESCE('｜' || NULLIF(relation,''), '') || COALESCE('｜' || NULLIF(temperature,''), '')",
-        "label": "家族関係メモ",
+        "label": "家族情報",
     },
 }
 
@@ -460,6 +484,14 @@ def normalize_text(value):
     except Exception:
         pass
     return str(value).strip()
+
+
+
+
+def normalize_card_type_name(card_type):
+    """旧名称を現在のカード種別名へ寄せる。"""
+    card_type = normalize_text(card_type)
+    return NYANTOMO_CARD_TYPE_ALIASES.get(card_type, card_type)
 
 
 def date_or_none(value):
@@ -2386,6 +2418,7 @@ def get_case_selector(key):
 
 def get_related_base_options(card_type, case_id):
     """Ver2.1：カード種別に応じて、紐付け可能な基本情報カードを返す。"""
+    card_type = normalize_card_type_name(card_type)
     spec = RELATED_BASE_CARD_MAP.get(card_type)
     if not spec:
         return {}, ["紐付けなし"], "", ""
@@ -2430,29 +2463,34 @@ def find_related_label(labels, mapping, related_id):
 
 def render_consultation_cards():
     st.subheader("Ver2.1｜カード整理")
-    st.caption("相談者の悩みをカード化し、猫情報カード・空き家カード・家族関係メモなどの基本情報カードへ紐付けます。基本情報は台帳、Ver2.1カードは判断整理です。")
+    st.caption("登録済みの基本情報カード（猫情報カード・空き家カード・家族情報）へ、気になることや次回確認事項を紐付けて整理します。")
 
     case_id, client_id = get_case_selector("consultation_cards_case")
     if not case_id:
         return
 
     st.markdown("### カード登録")
-    st.info("猫情報カード・空き家カード・家族関係メモは基本情報として先に登録しておくと、この画面で紐付けできます。")
+    st.info("カード種別を選ぶと、同じ案件に登録済みの基本情報カードだけを選べます。表示されない場合は、先に左メニューの『猫情報カード』『空き家カード』『家族関係メモ』で登録してください。")
+
+    # Streamlit の form 内では selectbox の変更だけでは再描画されないため、
+    # カード種別と紐付け先は form の外に出しています。
+    # これにより「カード種別を選んでも登録済みカードが選べない」問題を解消します。
+    c1, c2 = st.columns(2)
+    with c1:
+        card_type = st.selectbox("カード種別", NYANTOMO_CARD_TYPES, key="consultation_card_create_type")
+    with c2:
+        card_status = st.selectbox("状態", NYANTOMO_CARD_STATUS_OPTIONS, key="consultation_card_create_status")
+
+    related_mapping, related_labels, related_table, base_label = get_related_base_options(card_type, case_id)
+    related_select = st.selectbox(
+        f"紐付ける登録済みカード（{base_label}）",
+        related_labels,
+        key="consultation_card_create_related"
+    )
+    if related_labels == ["紐付けなし"]:
+        st.warning(f"この案件には、まだ紐付け可能な『{base_label}』が登録されていません。")
 
     with st.form("consultation_card_create"):
-        c1, c2 = st.columns(2)
-        with c1:
-            card_type = st.selectbox("カード種別", NYANTOMO_CARD_TYPES)
-        with c2:
-            card_status = st.selectbox("状態", NYANTOMO_CARD_STATUS_OPTIONS)
-
-        related_mapping, related_labels, related_table, base_label = get_related_base_options(card_type, case_id)
-        if related_table:
-            related_select = st.selectbox(f"紐付ける基本情報（{base_label}）", related_labels)
-        else:
-            related_select = "紐付けなし"
-            st.caption("このカード種別は、現時点では基本情報カードとの直接紐付け対象外です。")
-
         concern = st.text_area("気になっていること")
         client_words = st.text_area("相談者の言葉（できるだけ原文）")
         current_state = st.text_area("現在の状態")
@@ -2523,6 +2561,9 @@ def render_consultation_cards():
             created_at DESC
     """, {"case_id": case_id})
 
+    if df is not None and not df.empty:
+        df["card_type"] = df["card_type"].apply(normalize_card_type_name)
+
     show_cols = ["card_id", "card_type", "card_status", "related_label", "concern", "client_words", "current_state", "unknown_items", "next_check_items", "updated_at"]
     if df.empty:
         st.info("カードはまだ登録されていません。")
@@ -2537,25 +2578,39 @@ def render_consultation_cards():
         st.markdown("---")
         selected = st.selectbox("更新・削除するカードID", df["card_id"].tolist(), key="consultation_card_edit_select")
         row = df[df["card_id"] == selected].iloc[0]
+
+        edit_current_type = normalize_card_type_name(row.get("card_type", ""))
+        if edit_current_type not in NYANTOMO_CARD_TYPES:
+            edit_current_type = NYANTOMO_CARD_TYPES[0]
+
+        e1, e2 = st.columns(2)
+        with e1:
+            new_card_type = st.selectbox(
+                "カード種別",
+                NYANTOMO_CARD_TYPES,
+                index=NYANTOMO_CARD_TYPES.index(edit_current_type),
+                key="consultation_card_edit_type"
+            )
+        with e2:
+            new_card_status = st.selectbox(
+                "状態",
+                NYANTOMO_CARD_STATUS_OPTIONS,
+                index=NYANTOMO_CARD_STATUS_OPTIONS.index(row["card_status"]) if row["card_status"] in NYANTOMO_CARD_STATUS_OPTIONS else 0,
+                key="consultation_card_edit_status"
+            )
+
+        edit_mapping, edit_labels, edit_related_table, edit_base_label = get_related_base_options(new_card_type, case_id)
+        edit_default_label = find_related_label(edit_labels, edit_mapping, row.get("related_id", ""))
+        new_related_select = st.selectbox(
+            f"紐付ける登録済みカード（{edit_base_label}）",
+            edit_labels,
+            index=edit_labels.index(edit_default_label) if edit_default_label in edit_labels else 0,
+            key="consultation_card_edit_related"
+        )
+        if edit_labels == ["紐付けなし"]:
+            st.warning(f"この案件には、まだ紐付け可能な『{edit_base_label}』が登録されていません。")
+
         with st.form("consultation_card_edit"):
-            e1, e2 = st.columns(2)
-            with e1:
-                new_card_type = st.selectbox("カード種別", NYANTOMO_CARD_TYPES, index=NYANTOMO_CARD_TYPES.index(row["card_type"]) if row["card_type"] in NYANTOMO_CARD_TYPES else 0)
-            with e2:
-                new_card_status = st.selectbox("状態", NYANTOMO_CARD_STATUS_OPTIONS, index=NYANTOMO_CARD_STATUS_OPTIONS.index(row["card_status"]) if row["card_status"] in NYANTOMO_CARD_STATUS_OPTIONS else 0)
-
-            edit_mapping, edit_labels, edit_related_table, edit_base_label = get_related_base_options(new_card_type, case_id)
-            edit_default_label = find_related_label(edit_labels, edit_mapping, row.get("related_id", ""))
-            if edit_related_table:
-                new_related_select = st.selectbox(
-                    f"紐付ける基本情報（{edit_base_label}）",
-                    edit_labels,
-                    index=edit_labels.index(edit_default_label) if edit_default_label in edit_labels else 0
-                )
-            else:
-                new_related_select = "紐付けなし"
-                st.caption("このカード種別は、現時点では基本情報カードとの直接紐付け対象外です。")
-
             new_concern = st.text_area("気になっていること", normalize_text(row["concern"]))
             new_client_words = st.text_area("相談者の言葉（できるだけ原文）", normalize_text(row["client_words"]))
             new_current_state = st.text_area("現在の状態", normalize_text(row["current_state"]))
