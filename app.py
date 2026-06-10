@@ -3149,9 +3149,30 @@ def replace_policy_section(source_text, policy_section):
 
 def build_policy_source_text(case_id):
     """制度候補整理用に、案件情報と登録済み生活制度候補を必ず反映してまとめる。"""
+    # Ver3.4.1修正：AIへ渡す元データは毎回DBから直接読み直します。
+    # 登録直後に「未登録」と表示される原因を避けるため、
+    # build_case_ai_source() の内容に残る古い制度候補欄を、最新のpolicy_candidatesで必ず差し替えます。
     base_text = build_case_ai_source(case_id)
     latest_policy_section = build_policy_section_text(case_id)
     return replace_policy_section(base_text, latest_policy_section)
+
+
+def refresh_policy_source(case_id):
+    """Streamlit画面上で使う生活制度候補整理の元データを最新化する。"""
+    try:
+        clear_app_cache()
+    except Exception:
+        pass
+    return build_policy_source_text(case_id)
+
+
+def verify_policy_saved(policy_id):
+    """候補登録後、DBに保存されたか確認する。"""
+    row = fetch_one(
+        "SELECT policy_id FROM policy_candidates WHERE policy_id=%(policy_id)s",
+        {"policy_id": policy_id}
+    )
+    return bool(row)
 
 
 def suggest_policy_candidates_from_text(source_text):
@@ -3277,6 +3298,8 @@ def save_policy_candidate(case_id, client_id, values):
         **values,
     })
     log_action("create", "policy_candidates", policy_id, "制度候補登録")
+    # Ver3.4.1修正：登録後すぐに一覧・AI元データへ反映させるためキャッシュをクリアします。
+    clear_app_cache()
     return policy_id
 
 
@@ -3293,7 +3316,8 @@ def render_policy_candidates():
     selected_label = st.selectbox("対象案件", case_labels, key="policy_case_select")
     case_id = case_map[selected_label]
     client_id = case_to_client(case_id)
-    source_text = build_policy_source_text(case_id)
+    # Ver3.4.1修正：元データは表示箇所ごとに最新化します。
+    source_text = refresh_policy_source(case_id)
 
     cols = st.columns(4)
     with cols[0]:
@@ -3328,7 +3352,7 @@ def render_policy_candidates():
             memo = st.text_area("内部メモ")
             ok = st.form_submit_button("生活制度候補を登録", disabled=not can_write())
         if ok:
-            save_policy_candidate(case_id, client_id, {
+            policy_id = save_policy_candidate(case_id, client_id, {
                 "category": category,
                 "policy_name": policy_name or category,
                 "status": status,
@@ -3343,9 +3367,12 @@ def render_policy_candidates():
                 "official_url": official_url,
                 "memo": memo,
             })
-            st.success("生活制度候補を登録しました。")
-            clear_app_cache()
-            st.rerun()
+            if verify_policy_saved(policy_id):
+                st.success("生活制度候補を登録しました。一覧・AI元データへ反映しました。")
+                clear_app_cache()
+                st.rerun()
+            else:
+                st.error("登録処理後の確認で保存が確認できませんでした。")
 
         st.markdown("### キーワードから候補を仮抽出")
         with st.expander("抽出元データを確認", expanded=False):
@@ -3376,14 +3403,19 @@ def render_policy_candidates():
                             "official_url": "",
                             "memo": "キーワード仮抽出から登録",
                         }
-                        save_policy_candidate(case_id, client_id, values)
-                        st.success("候補を登録しました。")
-                        clear_app_cache()
-                        st.rerun()
+                        policy_id = save_policy_candidate(case_id, client_id, values)
+                        if verify_policy_saved(policy_id):
+                            st.success("候補を登録しました。一覧・AI元データへ反映しました。")
+                            clear_app_cache()
+                            st.rerun()
+                        else:
+                            st.error("登録処理後の確認で保存が確認できませんでした。")
 
     with tab2:
         st.markdown("### AIで制度候補を整理")
         st.info("AIは候補を並べるだけです。最新要綱や受付状況の確認は、必ず自治体・公式資料で行ってください。")
+        # Ver3.4.1修正：AIタブを開いた時点で再取得し、登録済み候補が未登録表示にならないようにします。
+        source_text = refresh_policy_source(case_id)
         extra_instruction = st.text_area("追加指示", placeholder="例：今回は空き家解体補助と耐震補助の可能性を中心に整理。", key="policy_ai_extra")
         with st.expander("AIに渡す元データ", expanded=False):
             st.text_area("元データ", source_text, height=300, key="policy_ai_source")
