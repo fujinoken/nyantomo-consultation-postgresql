@@ -1,13 +1,8 @@
 # app.py
-import hashlib
-import hmac
-import os
-import json
 import html
 import re
 from datetime import datetime
 from io import BytesIO
-import zipfile
 from pathlib import Path
 
 import pandas as pd
@@ -29,6 +24,58 @@ from core.utils import (
     date_or_none,
     ymd_selectbox_date,
 )
+from core.auth import (
+    hash_password,
+    verify_password,
+    clear_app_cache,
+    can_write,
+    can_admin,
+    show_db_setup_screen,
+    login_screen,
+    require_login,
+    logout_button,
+)
+from core.audit import log_action
+from ui.styles import apply_dashboard_css
+from ui.components import (
+    safe_df_display,
+    ny_card_status_icon,
+    ny_pending_status_icon,
+    ny_pick_summary,
+    ny_html,
+    render_nyantomo_card_tile,
+    resource_display,
+    resource_symbol,
+    resource_text,
+)
+from services.backup_service import (
+    BACKUP_DIR,
+    DEFAULT_AUTO_BACKUP_HOURS,
+    DEFAULT_BACKUP_KEEP,
+    get_secret_value,
+    get_backup_tables,
+    build_csv_zip_bytes,
+    save_backup_file,
+    cleanup_old_backups,
+    maybe_run_auto_backup,
+)
+from services.ai_service import (
+    get_openai_api_key,
+    get_openai_model,
+    build_case_ai_source,
+    build_ai_prompt,
+    call_openai_summary,
+    save_ai_summary,
+    build_guardian_ai_source,
+    build_guardian_ai_prompt,
+    build_guardian_card_ai_prompt,
+)
+from services.report_service import (
+    build_client_report_pdf_bytes,
+    build_guardian_report_pdf_bytes,
+)
+from db_schema.extension_schema import ensure_extension_tables
+from db_schema.assistant_schema import ensure_assistant_tables
 
 st.set_page_config(page_title=APP_TITLE, page_icon="🐾", layout="wide")
 
@@ -50,13 +97,7 @@ st.set_page_config(page_title=APP_TITLE, page_icon="🐾", layout="wide")
 # AUTO_BACKUP_KEEP = "14"
 # ============================================================
 
-BACKUP_DIR = Path("backups")
-BACKUP_DIR.mkdir(exist_ok=True)
-DEFAULT_AUTO_BACKUP_HOURS = 24
-DEFAULT_BACKUP_KEEP = 14
-DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_CACHE_TTL_SECONDS = 30
-DEFAULT_AUTO_BACKUP_CHECK_MINUTES = 60
 # ============================================================
 # にゃんとも相談管理 Ver2.0：カード整理OS 設定
 # ============================================================
@@ -353,105 +394,13 @@ RELATED_BASE_CARD_MAP = {
 
 
 
-def apply_dashboard_css():
-    st.markdown("""
-    <style>
-    .block-container {
-        padding-top: 2rem;
-        padding-bottom: 2rem;
-        max-width: 1280px;
-    }
-    div[data-testid="stMetric"] {
-        background: #ffffff;
-        border: 1px solid #e9edf5;
-        padding: 18px 18px;
-        border-radius: 18px;
-        box-shadow: 0 8px 22px rgba(30, 41, 59, 0.06);
-    }
-    div[data-testid="stMetric"] label {
-        color: #475569 !important;
-        font-weight: 700;
-    }
-    div[data-testid="stMetricValue"] {
-        color: #172033;
-        font-weight: 800;
-    }
-    .ny-card-soft {
-        background: linear-gradient(135deg, #fffaf0 0%, #ffffff 72%);
-        border: 1px solid #f4ddb3;
-        border-radius: 20px;
-        padding: 22px;
-        min-height: 130px;
-        box-shadow: 0 8px 22px rgba(30, 41, 59, 0.045);
-    }
-    .ny-card-blue {
-        background: linear-gradient(135deg, #f3f9ff 0%, #ffffff 75%);
-        border: 1px solid #cfe1f7;
-        border-radius: 20px;
-        padding: 22px;
-        min-height: 130px;
-        box-shadow: 0 8px 22px rgba(30, 41, 59, 0.045);
-    }
-    .ny-hero {
-        background: #ffffff;
-        border: 1px solid #edf0f7;
-        border-radius: 22px;
-        overflow: hidden;
-        box-shadow: 0 10px 26px rgba(30, 41, 59, 0.06);
-        margin-bottom: 18px;
-    }
-    .ny-hero-caption {
-        background: #fff1f1;
-        padding: 14px 18px;
-        font-weight: 700;
-        color: #3f3f46;
-        border-top: 1px solid #f5d6d6;
-    }
-    .ny-section-title {
-        font-size: 1.18rem;
-        font-weight: 800;
-        color: #172033;
-        margin-bottom: 0.35rem;
-    }
-    .ny-muted {
-        color: #64748b;
-        font-size: 0.92rem;
-    }
-    .ny-pill {
-        display: inline-block;
-        padding: 3px 10px;
-        border-radius: 999px;
-        background: #eef6ff;
-        color: #2563eb;
-        font-weight: 700;
-        font-size: 0.85rem;
-        margin-left: 8px;
-    }
-    .ny-footer {
-        text-align: center;
-        color: #64748b;
-        font-size: 0.88rem;
-        padding: 18px 0 4px;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-
-
-def safe_df_display(df, message, columns=None, height=None):
-    if df is None or df.empty:
-        st.info(message)
-    else:
-        show_df = df[columns] if columns else df
-        st.dataframe(show_df, use_container_width=True, hide_index=True, height=height)
 
 
 
-def hash_password(password):
-    return hashlib.sha256(password.encode("utf-8")).hexdigest()
 
 
-def verify_password(password, hashed):
-    return hmac.compare_digest(hash_password(password), str(hashed))
+
+
 
 
 def normalize_card_type_name(card_type):
@@ -460,64 +409,16 @@ def normalize_card_type_name(card_type):
     return NYANTOMO_CARD_TYPE_ALIASES.get(card_type, card_type)
 
 
-def clear_app_cache():
-    """
-    登録・更新・削除後に一覧やダッシュボードのキャッシュをクリアします。
-    30秒キャッシュで画面切替を軽くしつつ、更新直後は最新表示に戻します。
-    """
-    try:
-        st.cache_data.clear()
-    except Exception:
-        pass
 
 
 
 
-def can_write():
-    return st.session_state.get("role") in [ADMIN_ROLE, STAFF_ROLE]
 
 
-def can_admin():
-    return st.session_state.get("role") == ADMIN_ROLE
 
 
-def show_db_setup_screen():
-    st.title(APP_TITLE)
-    st.error("PostgreSQL接続URLがまだ設定されていません。")
-    st.markdown("""
-### Streamlit Cloud の Secrets 設定例
-
-```toml
-[postgres]
-url = "postgresql://USER:PASSWORD@HOST:PORT/DBNAME?sslmode=require"
-```
-
-または
-
-```toml
-DATABASE_URL = "postgresql://USER:PASSWORD@HOST:PORT/DBNAME?sslmode=require"
-```
-""")
-    st.stop()
 
 
-def log_action(action, table_name="", record_id="", memo=""):
-    try:
-        execute("""
-            INSERT INTO audit_logs
-            (audit_id, created_at, login_id, action, table_name, record_id, memo)
-            VALUES (%(audit_id)s, %(created_at)s, %(login_id)s, %(action)s, %(table_name)s, %(record_id)s, %(memo)s)
-        """, {
-            "audit_id": make_id("audit"),
-            "created_at": now_text(),
-            "login_id": st.session_state.get("login_id", ""),
-            "action": action,
-            "table_name": table_name,
-            "record_id": record_id,
-            "memo": memo,
-        })
-    except Exception:
-        pass
 
 
 @st.cache_data(ttl=DEFAULT_CACHE_TTL_SECONDS, show_spinner=False)
@@ -642,52 +543,10 @@ def case_to_client(case_id):
     return row["client_id"] if row else ""
 
 
-def login_screen():
-    st.title(APP_TITLE)
-    st.caption(APP_CAPTION)
-    st.subheader("ログイン")
-    with st.form("login_form"):
-        login_id = st.text_input("ログインID")
-        password = st.text_input("パスワード", type="password")
-        ok = st.form_submit_button("ログイン")
-    if ok:
-        user = fetch_one("""
-            SELECT user_id, login_id, password_hash, role, display_name, active
-            FROM app_users WHERE login_id = %(login_id)s
-        """, {"login_id": login_id})
-        if user and int(user.get("active", 0)) == 1 and verify_password(password, user["password_hash"]):
-            st.session_state["logged_in"] = True
-            st.session_state["user_id"] = user["user_id"]
-            st.session_state["login_id"] = user["login_id"]
-            st.session_state["role"] = user["role"]
-            st.session_state["display_name"] = user["display_name"]
-            log_action("login", "app_users", user["user_id"], "ログイン")
-            st.success("ログインしました。")
-            clear_app_cache()
-            st.rerun()
-        else:
-            st.error("ログインIDまたはパスワードが違います。")
-    st.info("初期設定：管理者 admin / admin123　職員 staff / staff123")
 
 
-def require_login():
-    if "logged_in" not in st.session_state:
-        st.session_state["logged_in"] = False
-    if not st.session_state["logged_in"]:
-        login_screen()
-        st.stop()
 
 
-def logout_button():
-    with st.sidebar:
-        st.markdown("---")
-        st.write(f"ログイン：{st.session_state.get('display_name', '')}")
-        st.write(f"権限：{st.session_state.get('role', '')}")
-        if st.button("ログアウト"):
-            log_action("logout", "app_users", st.session_state.get("user_id", ""), "ログアウト")
-            st.session_state.clear()
-            clear_app_cache()
-            st.rerun()
 
 
 def render_dashboard():
@@ -1194,913 +1053,47 @@ def render_line_templates():
 # 自動バックアップ
 # ============================================================
 
-def get_secret_value(key, default=""):
-    """st.secrets と環境変数の両方から設定値を取得する。"""
-    try:
-        if key in st.secrets:
-            return st.secrets.get(key, default)
-    except Exception:
-        pass
-    return os.environ.get(key, default)
-
-
-def ensure_extension_tables():
-    """app.py側で追加機能用テーブルを作る。db.py未改修でも動くようにする。"""
-    execute("""
-        CREATE TABLE IF NOT EXISTS nyantomo_backup_logs (
-            backup_id TEXT PRIMARY KEY,
-            created_at TIMESTAMP,
-            created_by TEXT,
-            backup_type TEXT,
-            file_name TEXT,
-            table_count INTEGER,
-            note TEXT
-        )
-    """)
-    # ai_summaries はdb.py側にある想定だが、古いDBでも落ちないよう最低限作成
-    execute("""
-        CREATE TABLE IF NOT EXISTS ai_summaries (
-            summary_id TEXT PRIMARY KEY,
-            case_id TEXT REFERENCES cases(case_id) ON DELETE CASCADE,
-            client_id TEXT REFERENCES clients(client_id) ON DELETE CASCADE,
-            created_at TIMESTAMP,
-            updated_at TIMESTAMP,
-            summary_type TEXT,
-            source_text TEXT,
-            summary_text TEXT,
-            memo TEXT
-        )
-    """)
-    try:
-        execute("ALTER TABLE ai_summaries ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP")
-    except Exception:
-        pass
-    try:
-        execute("ALTER TABLE ai_summaries ADD COLUMN IF NOT EXISTS model TEXT")
-    except Exception:
-        pass
-
-
-
-    # PostgreSQLでは、過去の失敗したCREATE TABLE等で
-    # テーブル本体は無いのに同名の型だけが残ることがあります。
-    # その状態で CREATE TABLE IF NOT EXISTS を実行すると
-    # duplicate key value violates unique constraint "pg_type_typname_nsp_index"
-    # が出るため、テーブルが無く型だけ残っている場合のみ型を掃除します。
-    for _table_name in ["consultation_cards", "pending_items"]:
-        try:
-            execute(f"""
-                DO $$
-                BEGIN
-                    IF to_regclass('public.{_table_name}') IS NULL
-                       AND EXISTS (
-                           SELECT 1
-                           FROM pg_type t
-                           JOIN pg_namespace n ON n.oid = t.typnamespace
-                           WHERE t.typname = '{_table_name}'
-                             AND n.nspname = 'public'
-                       ) THEN
-                        EXECUTE 'DROP TYPE public.{_table_name} CASCADE';
-                    END IF;
-                END $$;
-            """)
-        except Exception:
-            pass
-
-    # ========================================================
-    # にゃんとも相談管理 Ver2.0：カード整理OS 追加テーブル
-    # ========================================================
-    execute("""
-        CREATE TABLE IF NOT EXISTS consultation_cards (
-            card_id TEXT PRIMARY KEY,
-            case_id TEXT REFERENCES cases(case_id) ON DELETE CASCADE,
-            client_id TEXT REFERENCES clients(client_id) ON DELETE CASCADE,
-            created_at TIMESTAMP,
-            updated_at TIMESTAMP,
-            updated_by TEXT,
-            card_type TEXT,
-            card_status TEXT,
-            concern TEXT,
-            client_words TEXT,
-            current_state TEXT,
-            unknown_items TEXT,
-            related_people_places TEXT,
-            next_check_items TEXT,
-            memo TEXT
-        )
-    """)
-    # Ver2.1：基本情報カードとの紐付け用カラム
-    # related_table: cats / properties / family
-    # related_id: cat_id / property_id / family_id
-    # related_label: 表示用ラベル（登録時点の控え）
-    for _col_sql in [
-        "ALTER TABLE consultation_cards ADD COLUMN IF NOT EXISTS related_table TEXT",
-        "ALTER TABLE consultation_cards ADD COLUMN IF NOT EXISTS related_id TEXT",
-        "ALTER TABLE consultation_cards ADD COLUMN IF NOT EXISTS related_label TEXT",
-    ]:
-        try:
-            execute(_col_sql)
-        except Exception:
-            pass
-    execute("""
-        CREATE TABLE IF NOT EXISTS pending_items (
-            pending_id TEXT PRIMARY KEY,
-            case_id TEXT REFERENCES cases(case_id) ON DELETE CASCADE,
-            client_id TEXT REFERENCES clients(client_id) ON DELETE CASCADE,
-            created_at TIMESTAMP,
-            updated_at TIMESTAMP,
-            updated_by TEXT,
-            theme TEXT,
-            reason TEXT,
-            deadline_type TEXT,
-            next_check_date DATE,
-            related_people TEXT,
-            caution TEXT,
-            status TEXT,
-            memo TEXT
-        )
-    """)
-
-    # ========================================================
-    # Ver3.4：生活制度候補整理 追加テーブル
-    # ========================================================
-    execute("""
-        CREATE TABLE IF NOT EXISTS policy_candidates (
-            policy_id TEXT PRIMARY KEY,
-            case_id TEXT REFERENCES cases(case_id) ON DELETE CASCADE,
-            client_id TEXT REFERENCES clients(client_id) ON DELETE CASCADE,
-            created_at TIMESTAMP,
-            updated_at TIMESTAMP,
-            updated_by TEXT,
-            category TEXT,
-            policy_name TEXT,
-            status TEXT,
-            priority TEXT,
-            municipality TEXT,
-            trigger_words TEXT,
-            reason TEXT,
-            check_items TEXT,
-            caution TEXT,
-            next_action TEXT,
-            official_confirmed INTEGER DEFAULT 0,
-            official_url TEXT,
-            memo TEXT
-        )
-    """)
 
 
 
 
-    # ========================================================
-    # 後見モード Ver1.0 追加テーブル
-    # ========================================================
-    execute("""
-        CREATE TABLE IF NOT EXISTS guardian_wards (
-            ward_id TEXT PRIMARY KEY,
-            created_at TIMESTAMP,
-            updated_at TIMESTAMP,
-            created_by TEXT,
-            confidentiality_level TEXT,
-            status TEXT,
-            name TEXT NOT NULL,
-            birth_date DATE,
-            address TEXT,
-            phone TEXT,
-            facility_name TEXT,
-            guardian_type TEXT,
-            petitioner TEXT,
-            court_name TEXT,
-            guardian_name TEXT,
-            start_date DATE,
-            end_date DATE,
-            emergency_level TEXT,
-            next_check_date DATE,
-            memo TEXT
-        )
-    """)
-    execute("""
-        CREATE TABLE IF NOT EXISTS guardian_cards (
-            card_id TEXT PRIMARY KEY,
-            ward_id TEXT REFERENCES guardian_wards(ward_id) ON DELETE CASCADE,
-            created_at TIMESTAMP,
-            updated_at TIMESTAMP,
-            updated_by TEXT,
-            card_type TEXT,
-            confidentiality_level TEXT,
-            status TEXT,
-            related_card_id TEXT,
-            title TEXT,
-            field_1 TEXT,
-            field_2 TEXT,
-            field_3 TEXT,
-            field_4 TEXT,
-            field_5 TEXT,
-            field_6 TEXT,
-            field_7 TEXT,
-            field_8 TEXT,
-            field_9 TEXT,
-            field_10 TEXT,
-            memo TEXT
-        )
-    """)
-    execute("""
-        CREATE TABLE IF NOT EXISTS guardian_interview_logs (
-            log_id TEXT PRIMARY KEY,
-            ward_id TEXT REFERENCES guardian_wards(ward_id) ON DELETE CASCADE,
-            created_at TIMESTAMP,
-            updated_at TIMESTAMP,
-            updated_by TEXT,
-            confidentiality_level TEXT,
-            interview_date DATE,
-            place TEXT,
-            content TEXT,
-            ward_words TEXT,
-            family_words TEXT,
-            action_taken TEXT,
-            next_check TEXT,
-            memo TEXT
-        )
-    """)
-    execute("""
-        CREATE TABLE IF NOT EXISTS guardian_resource_map (
-            map_id TEXT PRIMARY KEY,
-            ward_id TEXT REFERENCES guardian_wards(ward_id) ON DELETE CASCADE,
-            created_at TIMESTAMP,
-            updated_at TIMESTAMP,
-            updated_by TEXT,
-            confidentiality_level TEXT,
-            family_status TEXT,
-            medical_status TEXT,
-            care_status TEXT,
-            housing_status TEXT,
-            asset_status TEXT,
-            pet_status TEXT,
-            professional_status TEXT,
-            overall_status TEXT,
-            shortage_memo TEXT,
-            enough_memo TEXT,
-            do_not_add_memo TEXT,
-            next_check TEXT,
-            memo TEXT
-        )
-    """)
-    execute("""
-        CREATE TABLE IF NOT EXISTS guardian_ai_support (
-            ai_id TEXT PRIMARY KEY,
-            ward_id TEXT REFERENCES guardian_wards(ward_id) ON DELETE CASCADE,
-            created_at TIMESTAMP,
-            updated_by TEXT,
-            support_type TEXT,
-            source_text TEXT,
-            result_text TEXT,
-            model TEXT,
-            memo TEXT
-        )
-    """)
 
 
-def get_backup_tables():
-    """config.TABLESに存在する主要テーブルをバックアップ対象にする。"""
-    seen = set()
-    tables = []
-    for table, label in TABLES:
-        if table not in seen:
-            tables.append((table, label))
-            seen.add(table)
-    for table, label in [("nyantomo_backup_logs", "自動バックアップログ"), ("consultation_cards", "相談カード整理"), ("pending_items", "保留事項"), ("policy_candidates", "制度候補整理"), ("guardian_wards", "後見_被後見人"), ("guardian_cards", "後見_カード"), ("guardian_interview_logs", "後見_面談記録"), ("guardian_resource_map", "後見_リソース地図"), ("guardian_ai_support", "後見_AI支援")]:
-        if table not in seen:
-            tables.append((table, label))
-    return tables
 
 
-def build_csv_zip_bytes():
-    """全テーブルをCSV ZIP化してbytesで返す。"""
-    data = {}
-    for table, label in get_backup_tables():
-        try:
-            data[label] = fetch_df(f"SELECT * FROM {table} ORDER BY 1")
-        except Exception as e:
-            data[label] = pd.DataFrame([{"error": str(e)}])
-
-    buffer = BytesIO()
-    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-        meta = {
-            "app": APP_TITLE,
-            "created_at": now_text(),
-            "backup_type": "csv_zip",
-            "tables": [label for _, label in get_backup_tables()],
-        }
-        zf.writestr("backup_meta.json", json.dumps(meta, ensure_ascii=False, indent=2))
-        for label, df in data.items():
-            safe_name = str(label).replace("/", "_").replace("\\", "_")
-            zf.writestr(f"{safe_name}.csv", df.to_csv(index=False).encode("utf-8-sig"))
-    buffer.seek(0)
-    return buffer.getvalue(), len(data)
 
 
-def save_backup_file(backup_type="manual", note=""):
-    """CSV ZIPバックアップをbackupsフォルダへ保存し、ログを残す。"""
-    zip_bytes, table_count = build_csv_zip_bytes()
-    stamp = now_jst().strftime("%Y%m%d_%H%M%S")
-    file_name = f"nyantomo_backup_{backup_type}_{stamp}.zip"
-    path = BACKUP_DIR / file_name
-    path.write_bytes(zip_bytes)
-    backup_id = make_id("backup")
-    execute("""
-        INSERT INTO nyantomo_backup_logs
-        (backup_id, created_at, created_by, backup_type, file_name, table_count, note)
-        VALUES (%(backup_id)s, %(created_at)s, %(created_by)s, %(backup_type)s, %(file_name)s, %(table_count)s, %(note)s)
-    """, {
-        "backup_id": backup_id,
-        "created_at": now_text(),
-        "created_by": st.session_state.get("login_id", "system"),
-        "backup_type": backup_type,
-        "file_name": file_name,
-        "table_count": table_count,
-        "note": note,
-    })
-    log_action("backup", "nyantomo_backup_logs", backup_id, f"{backup_type}: {file_name}")
-    return path
 
 
-def cleanup_old_backups(keep=None):
-    """古いバックアップファイルを指定件数だけ残して削除する。"""
-    try:
-        keep = int(keep or get_secret_value("AUTO_BACKUP_KEEP", DEFAULT_BACKUP_KEEP))
-    except Exception:
-        keep = DEFAULT_BACKUP_KEEP
-    files = sorted(BACKUP_DIR.glob("nyantomo_backup_*.zip"), key=lambda p: p.stat().st_mtime, reverse=True)
-    removed = 0
-    for p in files[keep:]:
-        try:
-            p.unlink()
-            removed += 1
-        except Exception:
-            pass
-    return removed
-
-
-def maybe_run_auto_backup():
-    """最終自動バックアップから指定時間以上経っていれば自動作成する。
-
-    軽量化：
-    画面操作のたびにDBへ確認しないよう、セッション内では
-    AUTO_BACKUP_CHECK_MINUTES ごとにだけ確認します。
-    """
-    try:
-        check_minutes = int(get_secret_value("AUTO_BACKUP_CHECK_MINUTES", DEFAULT_AUTO_BACKUP_CHECK_MINUTES))
-    except Exception:
-        check_minutes = DEFAULT_AUTO_BACKUP_CHECK_MINUTES
-    if check_minutes > 0:
-        last_check = st.session_state.get("_last_auto_backup_check")
-        now_dt = now_jst().replace(tzinfo=None)
-        if last_check:
-            try:
-                elapsed_minutes = (now_dt - last_check).total_seconds() / 60
-                if elapsed_minutes < check_minutes:
-                    return None
-            except Exception:
-                pass
-        st.session_state["_last_auto_backup_check"] = now_dt
-
-    try:
-        hours = int(get_secret_value("AUTO_BACKUP_HOURS", DEFAULT_AUTO_BACKUP_HOURS))
-    except Exception:
-        hours = DEFAULT_AUTO_BACKUP_HOURS
-    if hours <= 0:
-        return None
-
-    row = fetch_one("""
-        SELECT created_at
-        FROM nyantomo_backup_logs
-        WHERE backup_type = 'auto'
-        ORDER BY created_at DESC
-        LIMIT 1
-    """)
-    should_run = False
-    if not row or not row.get("created_at"):
-        should_run = True
-    else:
-        try:
-            last = pd.to_datetime(row["created_at"]).to_pydatetime()
-            elapsed_hours = (now_jst().replace(tzinfo=None) - last).total_seconds() / 3600
-            should_run = elapsed_hours >= hours
-        except Exception:
-            should_run = True
-
-    if should_run:
-        path = save_backup_file("auto", f"AUTO_BACKUP_HOURS={hours}")
-        cleanup_old_backups()
-        return path
-    return None
 
 
 # ============================================================
 # AI要約連携
 # ============================================================
 
-def get_openai_api_key():
-    try:
-        if "openai" in st.secrets and "api_key" in st.secrets["openai"]:
-            return st.secrets["openai"]["api_key"]
-    except Exception:
-        pass
-    return get_secret_value("OPENAI_API_KEY", "")
 
 
-def get_openai_model():
-    return get_secret_value("OPENAI_MODEL", DEFAULT_OPENAI_MODEL) or DEFAULT_OPENAI_MODEL
 
 
-def build_case_ai_source(case_id):
-    """AI要約用に、案件・履歴・関連カードを1つの安全なテキストにまとめる。"""
-    case = fetch_one("""
-        SELECT c.*, cl.name AS client_name, cl.age_group, cl.area, cl.contact_method, cl.position, cl.note AS client_note
-        FROM cases c
-        JOIN clients cl ON c.client_id = cl.client_id
-        WHERE c.case_id = %(case_id)s
-    """, {"case_id": case_id})
-    if not case:
-        return ""
-
-    def df_to_lines(title, df, cols):
-        lines = [f"\n■ {title}"]
-        if df.empty:
-            lines.append("未登録")
-            return "\n".join(lines)
-        for _, r in df.iterrows():
-            parts = []
-            for col in cols:
-                if col in r and normalize_text(r[col]):
-                    parts.append(f"{col}:{normalize_text(r[col])}")
-            lines.append("- " + "／".join(parts))
-        return "\n".join(lines)
-
-    source = f"""【相談者】
-氏名:{case.get('client_name','')}
-地域:{case.get('area','')}
-年代:{case.get('age_group','')}
-連絡方法:{case.get('contact_method','')}
-立場:{case.get('position','')}
-相談者備考:{case.get('client_note','')}
-
-【案件】
-案件名:{case.get('case_title','')}
-案件種別:{case.get('case_type','')}
-状態:{case.get('status','')}
-相談日:{case.get('consult_date','')}
-現在の状態:{case.get('current_state','')}
-住まい・空き家の状態:{case.get('house_state','')}
-猫との関係:{case.get('cat_relation','')}
-家族間の温度差:{case.get('family_gap','')}
-急がされ感:{case.get('pressure','')}
-心配ごと:{case.get('worries','')}
-今は決めないこと:{case.get('not_decide','')}
-初回確認事項:{case.get('first_check','')}
-外部向けメモ:{case.get('free_memo','')}
-内部メモ:{case.get('internal_memo','')}
-次回確認:{case.get('next_check','')}
-次回ヒアリング項目:{case.get('next_hearing_items','')}
-ヒアリング漏れ警告:{case.get('hearing_missing','')}
-今やらない方がいいこと:{case.get('do_not_do_now','')}
-次回確認日:{case.get('next_check_date','')}
-終了・最終メモ:{case.get('final_memo','')}
-"""
-
-    history = fetch_df("""
-        SELECT record_date, record_type, before_status, after_status, record, next_action, internal_memo
-        FROM history WHERE case_id=%(case_id)s
-        ORDER BY record_date DESC NULLS LAST, created_at DESC LIMIT 20
-    """, {"case_id": case_id})
-    source += df_to_lines("相談履歴", history, ["record_date", "record_type", "before_status", "after_status", "record", "next_action", "internal_memo"])
-
-    related_specs = [
-        ("properties", "空き家カード", ["property_name", "address", "property_status", "vacant_status", "key_hold", "neighborhood", "visit_frequency", "memo"]),
-        ("cats", "猫情報カード", ["cat_name", "age", "sex", "health_memo", "life_status", "future_plan", "memo"]),
-        ("family", "家族関係メモ", ["name", "relation", "contact_ok", "temperature", "memo"]),
-        ("consultation_cards", "Ver2.1カード整理", ["card_type", "card_status", "related_label", "concern", "client_words", "current_state", "unknown_items", "related_people_places", "next_check_items", "memo"]),
-        ("pending_items", "Ver2.0保留事項", ["theme", "reason", "deadline_type", "next_check_date", "related_people", "caution", "status", "memo"]),
-        ("policy_candidates", "Ver3.4生活制度候補整理", ["category", "policy_name", "status", "priority", "municipality", "trigger_words", "reason", "check_items", "caution", "next_action", "official_confirmed", "official_url", "memo"]),
-        ("line_messages", "LINEメモ", ["to_target", "message_text", "send_status", "response_memo"]),
-    ]
-    for table, title, cols in related_specs:
-        try:
-            df = fetch_df(f"SELECT * FROM {table} WHERE case_id=%(case_id)s ORDER BY created_at DESC LIMIT 20", {"case_id": case_id})
-            source += df_to_lines(title, df, cols)
-        except Exception as e:
-            source += f"\n■ {title}\n取得エラー:{e}"
-
-    return source.strip()
 
 
-def build_ai_prompt(summary_type, source_text):
-    """Ver2.2：カード整理AI用プロンプト。
-    相談記録の一般要約ではなく、カード・保留・次回確認を中心に整理する。
-    """
-    return f"""
-あなたは『にゃんとも 住まいと猫の相談室』の内部用「カード整理AI」です。
-役割は、相談記録を一般的に要約することではありません。
-相談者の言葉・基本情報カード・Ver2.1判断カード・保留事項を読み取り、
-「いま机の上に並んでいるカード」を見える化してください。
-
-最重要ルール：
-- 法律判断、医療判断、不動産判断、税務判断はしない
-- 売却すべき、後見すべき、信託すべき等の結論を出さない
-- 相談者を急がせない
-- 断定しない
-- 診断しない
-- スコア化しない
-- 相談者の言葉を勝手に強い表現へ変えない
-- 事実、未確定、保留、次回確認を分ける
-- にゃんともは「判断の時間を守る」立場で整理する
-
-出力形式は必ず以下の見出しで作成してください。
-
-## 1. 今回見えているテーマ
-- 例：猫の将来
-- 例：空き家管理
-- 例：家族との温度差
-
-## 2. いま机の上に並んでいるカード
-カードごとに、次の形で整理してください。
-- 🐾 カード種別：
-- 関連する基本情報：
-- 状態：
-- 相談者の言葉・気になっていること：
-- 未確認事項：
-- 次回確認：
-
-## 3. 今すぐ決めなくてよいこと
-- 例：売却時期
-- 例：後見制度を使うかどうか
-- 例：猫の預け先を最終決定すること
-
-## 4. 少し整理した方がよいこと
-- 例：兄との話し合い状況
-- 例：鍵の所在
-- 例：動物病院・預け先候補
-
-## 5. 次回確認
-- 次回の面談・連絡で確認するとよいことを3〜5個に絞る
-
-## 6. 生活制度候補整理
-空き家・高齢者・猫・相続に関する確認候補がある場合だけ書いてください。
-候補が薄い場合は「現時点では制度候補は未確定」と書いてください。
-- 領域：空き家／高齢者／猫／相続／横断
-- 候補名：空き家改修補助／解体補助／耐震補助／住宅セーフティネット／介護保険住宅改修／福祉用具／高齢者住宅／猫の預かり先／動物病院／ペット信託／任意後見／遺言／家族信託／相続人調査など
-- なぜ候補になるか：
-- まだ確認が必要なこと：所在地、建築年、空き家期間、所有者、要介護認定、猫の状態、本人意思、相続人候補、財産概要、関係者など
-- 注意点：制度・手続き・専門職領域が異なるため断定しない
-- 次の一手：自治体要綱確認、地域包括・ケアマネ確認、動物病院確認、専門職確認など
-
-## 7. 専門家につなぐ可能性
-- 弁護士、司法書士、税理士、宅建士、ケアマネ、包括、動物病院、自治体窓口など
-- ただし「必要」と断定せず「可能性」として整理する
-
-## 8. にゃんともとして関われる範囲
-- 相談整理、記録、空き家見守り、関係者整理、次回確認など
-- 断定や交渉ではなく、整理・保留・伴走の範囲で書く
-
-## 9. にゃんともでは扱わない方がよい範囲
-- 紛争、税務判断、登記、医療判断、強い不動産判断など
-- 必要に応じて他専門職へつなぐ可能性として書く
-
-## 10. 内部メモ用の短い要約
-3〜5行で、今回の相談の見取り図を短くまとめる。
-
-整理種別：{summary_type}
-
-以下の記録をカード整理してください。
----
-{source_text}
-""".strip()
-
-def call_openai_summary(prompt):
-    api_key = get_openai_api_key()
-    if not api_key:
-        raise RuntimeError("OPENAI_API_KEY が設定されていません。")
-    model = get_openai_model()
-    try:
-        from openai import OpenAI
-    except Exception as e:
-        raise RuntimeError("openai パッケージがありません。requirements.txt に openai を追加してください。") from e
-
-    client = OpenAI(api_key=api_key)
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": "あなたは相談記録を安全に整理する日本語の業務補助AIです。"},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0.2,
-    )
-    return response.choices[0].message.content.strip(), model
 
 
-def save_ai_summary(case_id, client_id, summary_type, source_text, summary_text, memo="", model=""):
-    summary_id = make_id("summary")
-    # model列がないDBでも保存できるよう2段階にする
-    try:
-        execute("""
-            INSERT INTO ai_summaries
-            (summary_id, case_id, client_id, created_at, updated_at, summary_type, source_text, summary_text, memo, model)
-            VALUES (%(summary_id)s, %(case_id)s, %(client_id)s, %(created_at)s, %(updated_at)s, %(summary_type)s, %(source_text)s, %(summary_text)s, %(memo)s, %(model)s)
-        """, {
-            "summary_id": summary_id,
-            "case_id": case_id,
-            "client_id": client_id,
-            "created_at": now_text(),
-            "updated_at": now_text(),
-            "summary_type": summary_type,
-            "source_text": source_text,
-            "summary_text": summary_text,
-            "memo": memo,
-            "model": model,
-        })
-    except Exception:
-        execute("""
-            INSERT INTO ai_summaries
-            (summary_id, case_id, client_id, created_at, updated_at, summary_type, source_text, summary_text, memo)
-            VALUES (%(summary_id)s, %(case_id)s, %(client_id)s, %(created_at)s, %(updated_at)s, %(summary_type)s, %(source_text)s, %(summary_text)s, %(memo)s)
-        """, {
-            "summary_id": summary_id,
-            "case_id": case_id,
-            "client_id": client_id,
-            "created_at": now_text(),
-            "updated_at": now_text(),
-            "summary_type": summary_type,
-            "source_text": source_text,
-            "summary_text": summary_text,
-            "memo": memo,
-        })
 
-    log_action("create", "ai_summaries", summary_id, f"AI要約作成：{summary_type}")
-    return summary_id
 
 
 # ============================================================
 # 相談者向けA4レポートPDF出力
 # ============================================================
 
-def _strip_markdown_for_report(text):
-    """PDF出力用にMarkdown記号を控えめに除去する。"""
-    value = normalize_text(text)
-    for mark in ["**", "__", "###", "##", "#", "`"]:
-        value = value.replace(mark, "")
-    value = value.replace("・", "- ")
-    return value.strip()
 
 
-def _extract_markdown_section(text, start_keywords, stop_pattern=r"\n\s*#{1,3}\s*\d+\."):
-    """AI整理結果から指定見出しの本文を取り出す。"""
-    import re
-    raw = normalize_text(text)
-    for kw in start_keywords:
-        m = re.search(rf"(?ms)^\s*#{{0,3}}\s*\d+\.\s*{re.escape(kw)}\s*\n(.*?)(?={stop_pattern}|\Z)", raw)
-        if m:
-            return _strip_markdown_for_report(m.group(1))
-    return ""
 
 
-def _shorten_report_lines(text, max_lines=6, max_chars=260):
-    """A4一枚に収めるため、長すぎる本文を要点行に圧縮する。"""
-    cleaned = _strip_markdown_for_report(text)
-    if not cleaned:
-        return "- 未整理"
-    lines = []
-    for line in cleaned.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        if line.startswith(("-", "・", "○", "●", "*")):
-            line = line.lstrip("-・○●* ")
-        if line:
-            lines.append("- " + line)
-    if not lines:
-        lines = ["- " + cleaned.replace("\n", " ")]
-    joined = "\n".join(lines[:max_lines])
-    if len(joined) > max_chars:
-        joined = joined[:max_chars].rstrip() + "…"
-    return joined
 
 
-def _build_report_one_liner(theme, organize, next_check, not_decide, pending):
-    """Ver2.6：相談者向けPDF上部に出す「今回のひとこと」を作る。"""
-    theme_lines = _shorten_report_lines(theme, max_lines=3, max_chars=180).splitlines()
-    org_lines = _shorten_report_lines(organize or next_check, max_lines=3, max_chars=180).splitlines()
-    nd_lines = _shorten_report_lines(not_decide or pending, max_lines=3, max_chars=180).splitlines()
-
-    def clean_first(lines):
-        for line in lines:
-            value = normalize_text(line).lstrip("-・○●*□ ")
-            if value and value != "未整理":
-                return value
-        return ""
-
-    main_theme = clean_first(theme_lines)
-    action_theme = clean_first(org_lines)
-    hold_theme = clean_first(nd_lines)
-
-    if action_theme and main_theme and action_theme != main_theme:
-        return f"今は「{main_theme}」を急いで決めるより、「{action_theme}」を少し整理する段階に見えます。"
-    if main_theme and hold_theme:
-        return f"今は「{main_theme}」について、結論を急がず「{hold_theme}」として置いておける部分があります。"
-    if main_theme:
-        return f"今は「{main_theme}」について、急いで結論を出すより、見えていることを一緒に整理する段階です。"
-    return "今は急いで結論を出すより、見えていることを一緒に整理する段階です。"
 
 
-def build_client_report_pdf_bytes(case_id, summary_row):
-    """カード整理AIの結果から、相談者向けA4一枚PDFを生成する。Ver2.8対応：上段ひとこと・中段4枠・下段注意書き。"""
-    try:
-        from reportlab.pdfgen import canvas
-        from reportlab.lib.pagesizes import A4
-        from reportlab.lib.units import mm
-        from reportlab.pdfbase.cidfonts import UnicodeCIDFont
-        from reportlab.pdfbase import pdfmetrics
-    except Exception as e:
-        raise RuntimeError("PDF出力には reportlab が必要です。requirements.txt に reportlab を追加してください。") from e
-
-    pdfmetrics.registerFont(UnicodeCIDFont("HeiseiMin-W3"))
-    pdfmetrics.registerFont(UnicodeCIDFont("HeiseiKakuGo-W5"))
-
-    case = fetch_one("""
-        SELECT c.case_title, c.consult_date, c.status, cl.name AS client_name, cl.area
-        FROM cases c JOIN clients cl ON c.client_id = cl.client_id
-        WHERE c.case_id=%(case_id)s
-    """, {"case_id": case_id}) or {}
-
-    summary_text = normalize_text(summary_row.get("summary_text", ""))
-    theme = _extract_markdown_section(summary_text, ["今回見えているテーマ", "今回見えていること"])
-    not_decide = _extract_markdown_section(summary_text, ["今すぐ決めなくてよいこと", "今決めなくてよいこと"])
-    organize = _extract_markdown_section(summary_text, ["少し整理した方がよいこと"])
-    next_check = _extract_markdown_section(summary_text, ["次回確認"])
-    pending = _extract_markdown_section(summary_text, ["保留していること", "保留事項", "今は保留すること"])
-
-    if not theme:
-        theme = summary_text[:220]
-    homework = ""
-    if organize:
-        homework += organize
-    if next_check:
-        homework += ("\n" if homework else "") + next_check
-    if not homework:
-        homework = "- 次回の相談で一緒に確認します。"
-    if not pending:
-        pending = not_decide or "- 今回は、無理に結論を出さず次回も確認します。"
-
-    one_liner = _build_report_one_liner(theme, organize, next_check, not_decide, pending)
-
-    title = "にゃんとも相談整理レポート"
-    subtitle = "急いで結論を出すためではなく、いま見えていることを一緒に眺めるためのメモです。"
-
-    buffer = BytesIO()
-    c = canvas.Canvas(buffer, pagesize=A4)
-    width, height = A4
-    margin_x = 16 * mm
-    y = height - 17 * mm
-
-    def wrap_text(value, font_name="HeiseiMin-W3", font_size=10, max_width=165*mm):
-        text_value = normalize_text(value)
-        result = []
-        for paragraph in text_value.splitlines():
-            paragraph = paragraph.strip()
-            if not paragraph:
-                result.append("")
-                continue
-            current = ""
-            for ch in paragraph:
-                test = current + ch
-                if c.stringWidth(test, font_name, font_size) <= max_width:
-                    current = test
-                else:
-                    if current:
-                        result.append(current)
-                    current = ch
-            if current:
-                result.append(current)
-        return result
-
-    def draw_wrapped(x, y0, body, font_name="HeiseiMin-W3", font_size=9, max_width=160*mm, max_lines=5, line_gap=4.6*mm):
-        c.setFont(font_name, font_size)
-        lines = wrap_text(body, font_name, font_size, max_width)
-        used = 0
-        for line in lines[:max_lines]:
-            c.drawString(x, y0, line)
-            y0 -= line_gap
-            used += 1
-        return y0, used
-
-    def draw_text_block(heading, body, max_lines=5):
-        nonlocal y
-        c.setFont("HeiseiKakuGo-W5", 11.5)
-        c.drawString(margin_x, y, heading)
-        y -= 5.8 * mm
-        lines = wrap_text(_shorten_report_lines(body, max_lines=max_lines, max_chars=260), "HeiseiMin-W3", 9.2, width - margin_x*2)
-        c.setFont("HeiseiMin-W3", 9.2)
-        for line in lines[:max_lines]:
-            c.drawString(margin_x + 3*mm, y, line)
-            y -= 4.8 * mm
-        y -= 2.3 * mm
-
-    def draw_one_liner_box():
-        nonlocal y
-        box_h = 21 * mm
-        c.setLineWidth(0.5)
-        c.roundRect(margin_x, y-box_h, width - margin_x*2, box_h, 3.5*mm, stroke=1, fill=0)
-        c.setFont("HeiseiKakuGo-W5", 10.5)
-        c.drawString(margin_x + 4*mm, y - 6*mm, "今回のひとこと")
-        draw_wrapped(
-            margin_x + 4*mm,
-            y - 12.5*mm,
-            one_liner,
-            "HeiseiMin-W3",
-            9.3,
-            width - margin_x*2 - 8*mm,
-            max_lines=2,
-            line_gap=4.3*mm,
-        )
-        y -= box_h + 7*mm
-
-    def draw_four_frame_checklist():
-        nonlocal y
-        c.setFont("HeiseiKakuGo-W5", 11.5)
-        c.drawString(margin_x, y, "4つの整理枠")
-        y -= 6 * mm
-
-        col_gap = 5 * mm
-        row_gap = 5 * mm
-        box_w = (width - margin_x*2 - col_gap) / 2
-        box_h = 43 * mm
-        left_x = margin_x
-        right_x = margin_x + box_w + col_gap
-
-        frames = [
-            ("□ 今回見えていること", theme, left_x, y),
-            ("□ 今決めなくてよいこと", not_decide or "- 次回も一緒に確認します。", right_x, y),
-            ("□ 次回までの宿題", homework, left_x, y - box_h - row_gap),
-            ("□ 保留していること", pending, right_x, y - box_h - row_gap),
-        ]
-
-        for heading, body, x, top_y in frames:
-            c.roundRect(x, top_y - box_h, box_w, box_h, 3*mm, stroke=1, fill=0)
-            c.setFont("HeiseiKakuGo-W5", 9.2)
-            c.drawString(x + 3*mm, top_y - 5.2*mm, heading)
-            compact = _shorten_report_lines(body, max_lines=5, max_chars=190)
-            draw_wrapped(
-                x + 3*mm,
-                top_y - 11*mm,
-                compact,
-                "HeiseiMin-W3",
-                8.0,
-                box_w - 6*mm,
-                max_lines=6,
-                line_gap=3.9*mm,
-            )
-        y -= (box_h * 2 + row_gap + 7*mm)
-
-    # header
-    c.setFont("HeiseiKakuGo-W5", 17)
-    c.drawString(margin_x, y, title)
-    y -= 7 * mm
-    c.setFont("HeiseiMin-W3", 8.7)
-    c.drawString(margin_x, y, subtitle)
-    y -= 7 * mm
-
-    # meta box
-    c.setLineWidth(0.5)
-    c.roundRect(margin_x, y-18*mm, width - margin_x*2, 16*mm, 4*mm, stroke=1, fill=0)
-    c.setFont("HeiseiMin-W3", 8.8)
-    c.drawString(margin_x + 4*mm, y - 5.5*mm, f"相談者：{normalize_text(case.get('client_name', '')) or '未設定'}")
-    c.drawString(margin_x + 4*mm, y - 11.5*mm, f"案件：{normalize_text(case.get('case_title', '')) or '未設定'}")
-    c.drawString(width/2, y - 5.5*mm, f"作成日：{today_text()}")
-    c.drawString(width/2, y - 11.5*mm, f"整理種別：{normalize_text(summary_row.get('summary_type', 'カード整理AI'))}")
-    y -= 24 * mm
-
-    draw_one_liner_box()
-
-    # Ver2.8：重複を避けるため、本文の1〜3表示は行わず、4つの整理枠だけを主役にする
-    draw_four_frame_checklist()
-
-    # footer note
-    y = max(y, 28*mm)
-    c.setLineWidth(0.4)
-    note_h = 17 * mm
-    c.roundRect(margin_x, y-note_h, width - margin_x*2, note_h, 3*mm, stroke=1, fill=0)
-    c.setFont("HeiseiMin-W3", 7.8)
-    footer_lines = [
-        "※このレポートは、相談内容を整理するためのメモです。",
-        "法律・税務・医療・不動産の判断を示すものではありません。",
-    ]
-    fy = y - 6*mm
-    for line in footer_lines:
-        c.drawString(margin_x + 4*mm, fy, line)
-        fy -= 4.2*mm
-    c.drawString(margin_x, 13*mm, "にゃんとも 住まいと猫の相談室")
-    c.showPage()
-    c.save()
-    buffer.seek(0)
-    return buffer.getvalue()
 
 
 
@@ -2108,210 +1101,8 @@ def build_client_report_pdf_bytes(case_id, summary_row):
 # 後見整理レポートPDF出力 Ver3.1
 # ============================================================
 
-def _build_guardian_report_one_liner(theme, organize, next_check, not_decide, pending):
-    """後見整理PDF上部に出す「今回のひとこと」を作る。"""
-    theme_lines = _shorten_report_lines(theme, max_lines=3, max_chars=180).splitlines()
-    org_lines = _shorten_report_lines(organize or next_check, max_lines=3, max_chars=180).splitlines()
-    nd_lines = _shorten_report_lines(not_decide or pending, max_lines=3, max_chars=180).splitlines()
-
-    def clean_first(lines):
-        for line in lines:
-            value = normalize_text(line).lstrip("-・○●*□ ")
-            if value and value != "未整理":
-                return value
-        return ""
-
-    main_theme = clean_first(theme_lines)
-    action_theme = clean_first(org_lines)
-    hold_theme = clean_first(nd_lines)
-
-    if action_theme and main_theme and action_theme != main_theme:
-        return f"今は「{main_theme}」を急いで決めるより、「{action_theme}」を少し整理する段階に見えます。"
-    if main_theme and hold_theme:
-        return f"今は「{main_theme}」について、結論を急がず「{hold_theme}」として置いておける部分があります。"
-    if main_theme:
-        return f"今は「{main_theme}」について、急いで結論を出すより、確認できていることを整理する段階です。"
-    return "今は急いで結論を出すより、本人の生活・希望・支援関係を整理する段階です。"
 
 
-def build_guardian_report_pdf_bytes(ward_id, ai_row):
-    """後見カード整理AIの結果から、後見整理A4一枚PDFを生成する。"""
-    try:
-        from reportlab.pdfgen import canvas
-        from reportlab.lib.pagesizes import A4
-        from reportlab.lib.units import mm
-        from reportlab.pdfbase.cidfonts import UnicodeCIDFont
-        from reportlab.pdfbase import pdfmetrics
-    except Exception as e:
-        raise RuntimeError("PDF出力には reportlab が必要です。requirements.txt に reportlab を追加してください。") from e
-
-    pdfmetrics.registerFont(UnicodeCIDFont("HeiseiMin-W3"))
-    pdfmetrics.registerFont(UnicodeCIDFont("HeiseiKakuGo-W5"))
-
-    ward = fetch_one("""
-        SELECT name, status, guardian_type, facility_name, emergency_level, next_check_date
-        FROM guardian_wards
-        WHERE ward_id=%(ward_id)s
-    """, {"ward_id": ward_id}) or {}
-
-    result_text = normalize_text(ai_row.get("result_text", ""))
-    theme = _extract_markdown_section(result_text, ["今回見えているテーマ", "今回見えていること"])
-    not_decide = _extract_markdown_section(result_text, ["今すぐ決めなくてよいこと", "今決めなくてよいこと"])
-    organize = _extract_markdown_section(result_text, ["少し整理した方がよいこと"])
-    next_check = _extract_markdown_section(result_text, ["次回確認"])
-    pending = _extract_markdown_section(result_text, ["判断保留", "保留していること", "保留事項", "今は保留すること"])
-
-    if not theme:
-        theme = result_text[:220]
-    homework = ""
-    if organize:
-        homework += organize
-    if next_check:
-        homework += ("\n" if homework else "") + next_check
-    if not homework:
-        homework = "- 次回の面談・記録確認で一緒に確認します。"
-    if not pending:
-        pending = not_decide or "- 今回は、無理に結論を出さず次回も確認します。"
-
-    one_liner = _build_guardian_report_one_liner(theme, organize, next_check, not_decide, pending)
-
-    title = "にゃんとも後見整理レポート"
-    subtitle = "本人の生活・希望・支援関係を、急がず確認するための内部整理メモです。"
-
-    buffer = BytesIO()
-    c = canvas.Canvas(buffer, pagesize=A4)
-    width, height = A4
-    margin_x = 16 * mm
-    y = height - 17 * mm
-
-    def wrap_text(value, font_name="HeiseiMin-W3", font_size=10, max_width=165*mm):
-        text_value = normalize_text(value)
-        result = []
-        for paragraph in text_value.splitlines():
-            paragraph = paragraph.strip()
-            if not paragraph:
-                result.append("")
-                continue
-            current = ""
-            for ch in paragraph:
-                test = current + ch
-                if c.stringWidth(test, font_name, font_size) <= max_width:
-                    current = test
-                else:
-                    if current:
-                        result.append(current)
-                    current = ch
-            if current:
-                result.append(current)
-        return result
-
-    def draw_wrapped(x, y0, body, font_name="HeiseiMin-W3", font_size=9, max_width=160*mm, max_lines=5, line_gap=4.6*mm):
-        c.setFont(font_name, font_size)
-        lines = wrap_text(body, font_name, font_size, max_width)
-        used = 0
-        for line in lines[:max_lines]:
-            c.drawString(x, y0, line)
-            y0 -= line_gap
-            used += 1
-        return y0, used
-
-    def draw_one_liner_box():
-        nonlocal y
-        box_h = 21 * mm
-        c.setLineWidth(0.5)
-        c.roundRect(margin_x, y-box_h, width - margin_x*2, box_h, 3.5*mm, stroke=1, fill=0)
-        c.setFont("HeiseiKakuGo-W5", 10.5)
-        c.drawString(margin_x + 4*mm, y - 6*mm, "今回のひとこと")
-        draw_wrapped(
-            margin_x + 4*mm,
-            y - 12.5*mm,
-            one_liner,
-            "HeiseiMin-W3",
-            9.3,
-            width - margin_x*2 - 8*mm,
-            max_lines=2,
-            line_gap=4.3*mm,
-        )
-        y -= box_h + 7*mm
-
-    def draw_four_frame_checklist():
-        nonlocal y
-        c.setFont("HeiseiKakuGo-W5", 11.5)
-        c.drawString(margin_x, y, "4つの整理枠")
-        y -= 6 * mm
-
-        col_gap = 5 * mm
-        row_gap = 5 * mm
-        box_w = (width - margin_x*2 - col_gap) / 2
-        box_h = 43 * mm
-        left_x = margin_x
-        right_x = margin_x + box_w + col_gap
-
-        frames = [
-            ("□ 今回見えていること", theme, left_x, y),
-            ("□ 今決めなくてよいこと", not_decide or "- 次回も確認します。", right_x, y),
-            ("□ 次回までの確認", homework, left_x, y - box_h - row_gap),
-            ("□ 保留・確認中のこと", pending, right_x, y - box_h - row_gap),
-        ]
-
-        for heading, body, x, top_y in frames:
-            c.roundRect(x, top_y - box_h, box_w, box_h, 3*mm, stroke=1, fill=0)
-            c.setFont("HeiseiKakuGo-W5", 9.2)
-            c.drawString(x + 3*mm, top_y - 5.2*mm, heading)
-            compact = _shorten_report_lines(body, max_lines=5, max_chars=190)
-            draw_wrapped(
-                x + 3*mm,
-                top_y - 11*mm,
-                compact,
-                "HeiseiMin-W3",
-                8.0,
-                box_w - 6*mm,
-                max_lines=6,
-                line_gap=3.9*mm,
-            )
-        y -= (box_h * 2 + row_gap + 7*mm)
-
-    # header
-    c.setFont("HeiseiKakuGo-W5", 17)
-    c.drawString(margin_x, y, title)
-    y -= 7 * mm
-    c.setFont("HeiseiMin-W3", 8.7)
-    c.drawString(margin_x, y, subtitle)
-    y -= 7 * mm
-
-    # meta box
-    c.setLineWidth(0.5)
-    c.roundRect(margin_x, y-18*mm, width - margin_x*2, 16*mm, 4*mm, stroke=1, fill=0)
-    c.setFont("HeiseiMin-W3", 8.6)
-    c.drawString(margin_x + 4*mm, y - 5.5*mm, f"対象者：{normalize_text(ward.get('name', '')) or '未設定'}")
-    c.drawString(margin_x + 4*mm, y - 11.5*mm, f"後見類型：{normalize_text(ward.get('guardian_type', '')) or '未設定'}")
-    c.drawString(width/2, y - 5.5*mm, f"作成日：{today_text()}")
-    c.drawString(width/2, y - 11.5*mm, f"整理種別：{normalize_text(ai_row.get('support_type', 'カード整理AI'))}")
-    y -= 24 * mm
-
-    draw_one_liner_box()
-    draw_four_frame_checklist()
-
-    # footer note
-    y = max(y, 28*mm)
-    c.setLineWidth(0.4)
-    note_h = 19 * mm
-    c.roundRect(margin_x, y-note_h, width - margin_x*2, note_h, 3*mm, stroke=1, fill=0)
-    c.setFont("HeiseiMin-W3", 7.6)
-    footer_lines = [
-        "※このレポートは、後見記録を整理するための内部メモです。",
-        "法律・税務・医療・不動産・財産処分の判断を示すものではありません。",
-        "家庭裁判所への提出書面そのものではなく、報告準備のための整理資料です。",
-    ]
-    fy = y - 5.5*mm
-    for line in footer_lines:
-        c.drawString(margin_x + 4*mm, fy, line)
-        fy -= 4.0*mm
-    c.drawString(margin_x, 13*mm, "にゃんとも 住まいと猫の相談室")
-    c.showPage()
-    c.save()
-    buffer.seek(0)
-    return buffer.getvalue()
 
 # ============================================================
 # にゃんとも相談管理 Ver2.0：カード整理OS
@@ -2717,64 +1508,14 @@ def render_pending_items():
                 st.rerun()
 
 
-def ny_card_status_icon(status):
-    """カード状態を視覚的に示すアイコンへ変換する。"""
-    status = normalize_text(status)
-    if status == "気になる":
-        return "🟥"
-    if status in ["検討中", "保留"]:
-        return "🟨"
-    if status == "整理済":
-        return "🟩"
-    return "⬜"
 
 
-def ny_pending_status_icon(status):
-    """保留事項の状態を視覚的に示すアイコンへ変換する。"""
-    status = normalize_text(status)
-    if status in ["家族確認待ち", "専門家確認待ち"]:
-        return "🟧"
-    if status in ["保留中", "次回確認"]:
-        return "🟨"
-    if status in ["整理済", "終了"]:
-        return "🟩"
-    return "⬜"
 
 
-def ny_pick_summary(*values, max_len=36):
-    """俯瞰カードに出す短い見出しを作る。"""
-    for value in values:
-        text_value = normalize_text(value)
-        if text_value:
-            text_value = " ".join(text_value.split())
-            if len(text_value) > max_len:
-                return text_value[:max_len] + "…"
-            return text_value
-    return "未入力"
 
 
-def ny_html(value):
-    return html.escape(normalize_text(value)).replace("\n", "<br>")
 
 
-def render_nyantomo_card_tile(icon, title, headline, status, detail="", footer=""):
-    """カードOS俯瞰用の小カードを表示する。"""
-    title = ny_html(title)
-    headline = ny_html(headline)
-    status = ny_html(status)
-    detail = ny_html(detail)
-    footer = ny_html(footer)
-    detail_html = f'<div class="ny-os-detail">{detail}</div>' if detail else ''
-    footer_html = f'<div class="ny-os-footer">{footer}</div>' if footer else ''
-    st.markdown(f"""
-    <div class="ny-os-card">
-        <div class="ny-os-title"><span class="ny-os-icon">{icon}</span> {title}</div>
-        <div class="ny-os-headline">{headline}</div>
-        <div class="ny-os-status">{status}</div>
-        {detail_html}
-        {footer_html}
-    </div>
-    """, unsafe_allow_html=True)
 
 
 def render_card_os_overview():
@@ -3803,20 +2544,8 @@ SUPPORT_CATEGORY_OPTIONS = [
     "不動産会社", "管理会社", "猫ボランティア", "家族", "親族", "その他"
 ]
 
-def resource_display(value):
-    value = normalize_text(value)
-    if not value:
-        return "□ 不明"
-    if value in RESOURCE_STATUS_OPTIONS:
-        return value
-    return RESOURCE_STATUS_LEGACY_MAP.get(value, value)
 
-def resource_symbol(value):
-    return resource_display(value).split(" ")[0]
 
-def resource_text(value):
-    parts = resource_display(value).split(" ", 1)
-    return parts[1] if len(parts) > 1 else resource_display(value)
 CONFIDENTIALITY_OPTIONS = ["通常", "注意", "高", "最重要"]
 GUARDIAN_STATUS_OPTIONS = ["準備中", "受任中", "見守り中", "要確認", "終了"]
 EMERGENCY_OPTIONS = ["低", "中", "高", "緊急"]
@@ -4111,136 +2840,12 @@ def render_guardian_interviews():
     st.dataframe(df, use_container_width=True, hide_index=True)
 
 
-def build_guardian_ai_source(ward_id):
-    ward = fetch_one("SELECT * FROM guardian_wards WHERE ward_id=%(ward_id)s", {"ward_id": ward_id})
-    if not ward:
-        return ""
-    text = ["【被後見人】"]
-    for k, v in ward.items():
-        text.append(f"{k}:{normalize_text(v)}")
-    cards = fetch_df("SELECT * FROM guardian_cards WHERE ward_id=%(ward_id)s ORDER BY updated_at DESC NULLS LAST, created_at DESC", {"ward_id": ward_id})
-    text.append("\n【カード】")
-    if cards.empty:
-        text.append("未登録")
-    else:
-        for _, r in cards.iterrows():
-            text.append(f"- {r.get('card_type','')}｜{r.get('title','')}｜{r.get('status','')}｜{r.get('field_1','')}｜{r.get('field_2','')}｜{r.get('memo','')}")
-    maps = fetch_df("SELECT * FROM guardian_resource_map WHERE ward_id=%(ward_id)s ORDER BY updated_at DESC NULLS LAST LIMIT 3", {"ward_id": ward_id})
-    text.append("\n【リソース地図】")
-    text.append(maps.to_string(index=False) if not maps.empty else "未登録")
-    logs = fetch_df("SELECT * FROM guardian_interview_logs WHERE ward_id=%(ward_id)s ORDER BY interview_date DESC NULLS LAST, created_at DESC LIMIT 10", {"ward_id": ward_id})
-    text.append("\n【面談記録】")
-    text.append(logs.to_string(index=False) if not logs.empty else "未登録")
-    return "\n".join(text)
-
-
-def build_guardian_ai_prompt(support_type, source_text):
-    return f"""
-あなたは後見人の内部記録整理係です。
-判断を代行せず、本人の意思・生活・支援関係を整理してください。
-法的判断、医療判断、財産処分の断定、専門職への越権助言はしないでください。
-
-出力形式：
-1. 事実として確認できること
-2. 未確認・不足している情報
-3. 本人の意思・生活上大切にしたい点
-4. 現在使えるリソース
-5. 不足または将来確認したいリソース
-6. 今は増やさなくてよい支援・後見人が抱え込まないための注意
-7. 次回確認事項
-8. 家庭裁判所報告に向けた内部メモ
-
-支援種別：{support_type}
----
-{source_text}
-""".strip()
 
 
 
 
-def build_guardian_card_ai_prompt(summary_type, source_text):
-    """後見モード用：カード整理AIプロンプト。
-    後見カード・面談記録・リソース地図を、本人中心のカード配置として整理する。
-    """
-    return f"""
-あなたは『にゃんとも 住まいと猫の相談室』の後見モード用「カード整理AI」です。
-役割は、後見記録を一般的に要約することではありません。
-本人希望カード、家族カード、医療カード、介護カード、財産カード、住まいカード、ペットカード、支援者カード、判断保留カード、家庭裁判所対応カード、面談記録、リソース地図を読み取り、
-「いま机の上に並んでいる後見カード」を見える化してください。
 
-最重要ルール：
-- 後見人・行政書士の判断を代行しない
-- 法的判断、医療判断、財産処分、不動産処分、税務判断を断定しない
-- 本人の意思を決めつけない
-- 家族・支援者の善悪を決めつけない
-- 支援を増やすことを当然の結論にしない
-- 後見人が抱え込む方向へ誘導しない
-- 家庭裁判所提出用の断定文ではなく、内部整理メモとして書く
-- 事実、未確認、保留、次回確認を分ける
-- 「本人の生活の安定」と「後見人が抱え込まない境界線」を両方守る
 
-出力形式は必ず以下の見出しで作成してください。
-
-## 1. 今回見えているテーマ
-- 例：本人希望
-- 例：家族との温度差
-- 例：医療・介護連携
-- 例：財産管理
-- 例：住まい・施設
-- 例：ペットの将来
-- 例：家庭裁判所報告
-
-## 2. いま机の上に並んでいる後見カード
-カードごとに、次の形で整理してください。
-- 🐾 カード種別：
-- 現在見えていること：
-- 本人の言葉・希望：
-- 家族・支援者の関係：
-- 未確認事項：
-- 次回確認：
-
-## 3. 今すぐ決めなくてよいこと
-- 例：施設移動の最終判断
-- 例：財産処分の方向性
-- 例：家族との関係整理の結論
-- 例：ペットの最終的な引き取り先
-※ただし、緊急性がある可能性があるものは「保留ではなく確認が必要」と表現してください。
-
-## 4. 少し整理した方がよいこと
-- 例：本人の希望の原文
-- 例：医療・介護の連絡先
-- 例：家族の温度感
-- 例：収支・定期支払
-- 例：住まい・施設の安全面
-- 例：家庭裁判所報告に必要な事実
-
-## 5. 次回確認
-次回の面談・連絡・記録確認で確認するとよいことを3〜7個に絞ってください。
-
-## 6. つなぐ可能性がある専門職・支援者
-- 主治医、ケアマネ、施設担当者、包括、社協、弁護士、司法書士、税理士、動物病院、親族など
-- 「必要」と断定せず、「可能性」として整理してください。
-
-## 7. 後見人として関われる範囲
-- 記録、連絡調整、本人意思の確認、財産管理の事実整理、家庭裁判所報告準備など
-- 断定や抱え込みではなく、確認・整理・報告・連携の範囲で書いてください。
-
-## 8. 後見人が抱え込まない方がよい範囲
-- 医療判断、法的紛争、税務判断、感情調整の抱え込み、家族間対立の仲裁、緊急対応の常時化など
-- 必要に応じて他専門職・関係機関へつなぐ可能性として書いてください。
-
-## 9. 家庭裁判所報告に向けた内部メモ
-家庭裁判所にそのまま出す文章ではなく、後日報告書を作るための内部整理として、3〜6行でまとめてください。
-
-## 10. 内部メモ用の短い要約
-今回の後見カード全体の見取り図を3〜5行でまとめてください。
-
-整理種別：{summary_type}
-
-以下の後見記録をカード整理してください。
----
-{source_text}
-""".strip()
 
 
 def render_guardian_card_ai():
@@ -4550,24 +3155,6 @@ ASSISTANT_MODE_OPTIONS = [
 ]
 
 
-def ensure_assistant_tables():
-    """にゃんともアシスタント用ログテーブル。古いDBでもapp.pyだけで追加できるようにする。"""
-    execute("""
-        CREATE TABLE IF NOT EXISTS assistant_logs (
-            assistant_log_id TEXT PRIMARY KEY,
-            created_at TIMESTAMP,
-            updated_at TIMESTAMP,
-            created_by TEXT,
-            case_id TEXT REFERENCES cases(case_id) ON DELETE SET NULL,
-            client_id TEXT REFERENCES clients(client_id) ON DELETE SET NULL,
-            mode TEXT,
-            user_question TEXT,
-            source_text TEXT,
-            answer_text TEXT,
-            model TEXT,
-            memo TEXT
-        )
-    """)
 
 
 def save_assistant_log(case_id, client_id, mode, user_question, source_text, answer_text, model="", memo=""):
