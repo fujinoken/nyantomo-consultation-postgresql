@@ -1,9 +1,18 @@
 # db.py
 import os
+from contextlib import contextmanager
+
 import pandas as pd
 import psycopg2
 import psycopg2.extras
+import psycopg2.extensions
+import psycopg2.pool
 import streamlit as st
+
+
+MIN_CONNECTIONS = 1
+MAX_CONNECTIONS = 5
+
 
 def get_database_url():
     try:
@@ -21,61 +30,98 @@ def get_database_url():
 def has_database_url():
     return bool(get_database_url())
 
-def get_conn():
+
+@st.cache_resource(show_spinner=False)
+def get_connection_pool():
     url = get_database_url()
     if not url:
         raise RuntimeError("PostgreSQL接続URLが設定されていません。")
-    return psycopg2.connect(url)
+    return psycopg2.pool.ThreadedConnectionPool(
+        MIN_CONNECTIONS,
+        MAX_CONNECTIONS,
+        dsn=url,
+    )
 
-def execute(sql, params=None):
-    conn = None
-    cur = None
+
+def get_conn():
+    return get_connection_pool().getconn()
+
+
+def _connection_is_broken(conn, error=None):
+    if conn is None or conn.closed:
+        return True
+    return isinstance(error, (psycopg2.InterfaceError, psycopg2.OperationalError))
+
+
+def _return_connection(pool, conn, discard=False):
+    if conn is None:
+        return
+    if conn.closed:
+        discard = True
+    if not discard:
+        try:
+            if conn.get_transaction_status() != psycopg2.extensions.TRANSACTION_STATUS_IDLE:
+                conn.rollback()
+        except Exception:
+            discard = True
     try:
-        conn = get_conn()
-        cur = conn.cursor()
-        cur.execute(sql, params or {})
-        conn.commit()
-    except Exception:
-        if conn:
-            conn.rollback()
+        pool.putconn(conn, close=discard)
+    except BaseException:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        raise
+
+
+@contextmanager
+def _pooled_connection():
+    pool = get_connection_pool()
+    conn = pool.getconn()
+    discard = False
+    active_error = None
+    try:
+        yield conn
+    except BaseException as error:
+        active_error = error
+        discard = _connection_is_broken(conn, error)
+        if not discard:
+            try:
+                conn.rollback()
+            except Exception:
+                discard = True
         raise
     finally:
-        if cur:
-            cur.close()
-        if conn:
-            conn.close()
+        try:
+            _return_connection(pool, conn, discard=discard)
+        except BaseException:
+            if active_error is None:
+                raise
+
+
+def execute(sql, params=None):
+    with _pooled_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, params or {})
+        conn.commit()
+
 
 def fetch_df(sql, params=None):
-    conn = None
-    try:
-        conn = get_conn()
+    with _pooled_connection() as conn:
         return pd.read_sql_query(sql, conn, params=params or {})
-    finally:
-        if conn:
-            conn.close()
+
 
 def fetch_one(sql, params=None):
-    conn = None
-    cur = None
-    try:
-        conn = get_conn()
-        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute(sql, params or {})
-        row = cur.fetchone()
-        return dict(row) if row else None
-    finally:
-        if cur:
-            cur.close()
-        if conn:
-            conn.close()
+    with _pooled_connection() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(sql, params or {})
+            row = cur.fetchone()
+            return dict(row) if row else None
+
 
 def init_db(hash_password_func, make_id_func, now_text_func):
     # 起動時はCREATE TABLE / CREATE INDEX IF NOT EXISTSのみ。ALTER TABLEは実行しない。
-    conn = None
-    cur = None
-    try:
-        conn = get_conn()
-        cur = conn.cursor()
+    with _pooled_connection() as conn, conn.cursor() as cur:
 
         cur.execute("""
             CREATE TABLE IF NOT EXISTS clients (
@@ -302,12 +348,3 @@ def init_db(hash_password_func, make_id_func, now_text_func):
             """, (make_id_func("user"), now_text_func(), now_text_func(), "staff", hash_password_func("staff123"), "職員", "職員"))
 
         conn.commit()
-    except Exception:
-        if conn:
-            conn.rollback()
-        raise
-    finally:
-        if cur:
-            cur.close()
-        if conn:
-            conn.close()
