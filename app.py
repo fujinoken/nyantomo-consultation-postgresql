@@ -98,6 +98,16 @@ st.set_page_config(page_title=APP_TITLE, page_icon="🐾", layout="wide")
 # ============================================================
 
 DEFAULT_CACHE_TTL_SECONDS = 30
+
+
+@st.cache_resource(show_spinner=False)
+def initialize_application_schema():
+    """Initialize the database schema once per Streamlit process."""
+    init_db(hash_password, make_id, now_text)
+    ensure_extension_tables()
+    ensure_assistant_tables()
+
+
 # ============================================================
 # にゃんとも相談管理 Ver2.0：カード整理OS 設定
 # ============================================================
@@ -3925,7 +3935,7 @@ def render_nyantomo_assistant():
     st.caption("相談履歴・過去案件・カード・保留事項・制度候補を横断して、判断を急がせずに整理します。")
 
     try:
-        ensure_assistant_tables()
+        initialize_application_schema()
     except Exception as e:
         st.warning(f"アシスタント用テーブルの確認に失敗しました：{e}")
 
@@ -4098,9 +4108,7 @@ if not has_database_url():
     show_db_setup_screen()
 
 try:
-    init_db(hash_password, make_id, now_text)
-    ensure_extension_tables()
-    ensure_assistant_tables()
+    initialize_application_schema()
 except Exception as e:
     st.title(APP_TITLE)
     st.error("PostgreSQLへの接続または初期化に失敗しました。")
